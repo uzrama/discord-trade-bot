@@ -95,7 +95,10 @@ TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 TELEGRAM_CHAT_ID=your_telegram_chat_id
 
 # Redis
-REDIS_URL=redis://localhost:6379
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+REDIS_PASSWORD=redis_password
+REDIS_TASKIQ_DB=0
 ```
 
 4. Configure trading settings in `config.yaml`:
