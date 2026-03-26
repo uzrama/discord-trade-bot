@@ -4,8 +4,6 @@ from typing import final
 
 from dishka import Provider, Scope, provide
 
-logger = logging.getLogger(__name__)
-
 from discord_trade_bot.core.application.common.interfaces.notification import NotificationGatewayProtocol
 from discord_trade_bot.core.application.common.interfaces.repository import StateRepositoryProtocol
 from discord_trade_bot.core.application.signal.use_cases import ProcessSignalUseCase
@@ -16,6 +14,8 @@ from discord_trade_bot.infrastructure.exchanges.bybit import BybitFuturesAdapter
 from discord_trade_bot.infrastructure.exchanges.composite import CompositeExchangeGateway
 from discord_trade_bot.main.config.app import AppConfig
 from discord_trade_bot.main.config.yaml.general import AppMode
+
+logger = logging.getLogger(__name__)
 
 
 @final
