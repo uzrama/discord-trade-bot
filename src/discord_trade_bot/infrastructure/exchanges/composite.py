@@ -89,6 +89,20 @@ class CompositeExchangeGateway(ExchangeGatewayProtocol, ExchangeRegistryProtocol
     async def get_order_status(self, symbol: str, order_id: str) -> dict[str, Any]:
         return await self._get_default_exchange().get_order_status(symbol, order_id)
 
+    @override
+    def is_position_open(self, position: dict[str, Any], side: TradeSide) -> bool:
+        return self._get_default_exchange().is_position_open(position, side)
+
+    @override
+    async def wait_for_position_ready(
+        self,
+        symbol: str,
+        side: TradeSide,
+        timeout: float = 10.0,
+        check_interval: float = 0.5,
+    ) -> bool:
+        return await self._get_default_exchange().wait_for_position_ready(symbol, side, timeout, check_interval)
+
     async def close(self):
         for adapter in self._exchanges.values():
             await adapter.close()
