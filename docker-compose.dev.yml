@@ -1,0 +1,135 @@
+version: '3.8'
+
+services:
+  # Redis - Task queue for Taskiq
+  redis:
+    image: redis:7-alpine
+    container_name: discord-bot-redis-dev
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"  # Expose for debugging
+    volumes:
+      - redis-data-dev:/data
+    networks:
+      - bot-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Discord Bot - Monitors Discord channels for trading signals
+  discord-bot:
+    build:
+      context: .
+      target: development
+      dockerfile: Dockerfile
+    container_name: discord-bot-listener-dev
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=DEBUG
+      - SERVICE_TYPE=discord
+    volumes:
+      - ./src:/app/src:ro  # Hot-reload source code
+      - bot-data-dev:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - bot-network
+    command: discord-trade-bot discord
+    stdin_open: true
+    tty: true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # WebSocket Tracker - Tracks order execution and manages positions
+  tracker:
+    build:
+      context: .
+      target: development
+      dockerfile: Dockerfile
+    container_name: discord-bot-tracker-dev
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=DEBUG
+      - SERVICE_TYPE=tracker
+    volumes:
+      - ./src:/app/src:ro  # Hot-reload source code
+      - bot-data-dev:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - bot-network
+    command: discord-trade-bot tracker
+    stdin_open: true
+    tty: true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Taskiq Worker - Processes background tasks (signal processing, order execution)
+  worker:
+    build:
+      context: .
+      target: development
+      dockerfile: Dockerfile
+    container_name: discord-bot-worker-dev
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=DEBUG
+      - SERVICE_TYPE=worker
+    volumes:
+      - ./src:/app/src:ro  # Hot-reload source code
+      - bot-data-dev:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - bot-network
+    command: discord-trade-bot worker
+    stdin_open: true
+    tty: true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  redis-data-dev:
+    driver: local
+  bot-data-dev:
+    driver: local
+
+networks:
+  bot-network:
+    driver: bridge

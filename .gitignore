@@ -11,6 +11,9 @@ wheels/
 
 # Environment variables
 .env
+.env.*
+!.env.dist
+!.env.docker
 
 # State and data files
 agent_state.db
@@ -30,3 +33,7 @@ htmlcov/
 .idea/
 *.swp
 *.swo
+
+# Docker
+.docker/
+docker-compose.override.yml
