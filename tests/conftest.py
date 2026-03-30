@@ -196,6 +196,46 @@ def test_config():
     }
 
 
+@pytest.fixture
+def mock_app_config():
+    """Create a mock AppConfig for testing."""
+    from unittest.mock import Mock
+    from discord_trade_bot.main.config.yaml.discord import Source, DiscordYamlConfig
+    from discord_trade_bot.main.config.yaml.fee import FeesConfig
+
+    # Create mock source config
+    mock_source = Source(
+        source_id="test_channel_123",
+        channel_id=123456789,
+        exchange="binance",
+        fixed_leverage=20,
+        default_sl_percent=2.0,
+        move_to_breakeven_on_tp1=True,
+    )
+
+    # Create mock discord config
+    mock_discord = DiscordYamlConfig(watch_sources=[mock_source])
+
+    # Create mock fees config
+    mock_fees = FeesConfig(
+        maker=0.0002,
+        taker=0.00055,
+        break_even_fee_mode="taker",
+        break_even_extra_buffer=0.0,
+    )
+
+    # Create mock yaml config
+    mock_yaml = Mock()
+    mock_yaml.discord = mock_discord
+
+    # Create mock app config
+    mock_config = Mock()
+    mock_config.yaml = mock_yaml
+    mock_config.fees = mock_fees
+
+    return mock_config
+
+
 # ============================================================================
 # Test Data Fixtures
 # ============================================================================

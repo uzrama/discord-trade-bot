@@ -4,6 +4,7 @@ from typing import Any, final, override
 
 from binance import AsyncClient, BinanceSocketManager
 
+from discord_trade_bot.core.domain.services.tp_calculator import calculate_tp_quantities
 from discord_trade_bot.core.domain.value_objects.formatters import format_price, format_quantity
 from discord_trade_bot.core.domain.value_objects.trading import TradeSide
 from discord_trade_bot.infrastructure.exchanges.base import BaseExchangeAdapter
@@ -86,12 +87,12 @@ class BinanceFuturesAdapter(BaseExchangeAdapter):
         if side == TradeSide.LONG:
             min_sl_price = current_price * (1 - min_distance_pct / 100)
             if stop_loss >= min_sl_price:
-                logger.warning(f"SL {stop_loss} too close to current price {current_price} (min: {min_sl_price}), skipping SL order")
+                logger.error("❌ SL validation FAILED for LONG position.")
                 return False
         else:  # SHORT
             max_sl_price = current_price * (1 + min_distance_pct / 100)
             if stop_loss <= max_sl_price:
-                logger.warning(f"SL {stop_loss} too close to current price {current_price} (max: {max_sl_price}), skipping SL order")
+                logger.error("❌ SL validation FAILED for SHORT position.")
                 return False
         return True
 
@@ -181,17 +182,60 @@ class BinanceFuturesAdapter(BaseExchangeAdapter):
         return res
 
     @override
-    async def place_stop_market_order(self, symbol: str, side: TradeSide, stop_price: float) -> dict[str, Any]:
+    async def place_stop_market_order(
+        self,
+        symbol: str,
+        side: TradeSide,
+        stop_price: float,
+        qty: float | None = None,
+    ) -> dict[str, Any]:
+        """Place a stop market order.
+
+        Args:
+            symbol: Trading pair symbol
+            side: Position side (LONG or SHORT)
+            stop_price: Stop trigger price
+            qty: Optional quantity. If None, uses closePosition=true
+
+        Returns:
+            Order response from exchange with algoId for conditional orders
+        """
         client = await self._get_client()
         side_val = "BUY" if side == TradeSide.LONG else "SELL"
-        res = await client.futures_create_order(
-            symbol=symbol,
-            side=side_val,
-            type="STOP_MARKET",
-            stopPrice=format_price(stop_price),
-            closePosition="true",
-            workingType="MARK_PRICE",
-        )
+
+        # Get symbol precision info
+        try:
+            symbol_info = await self.get_symbol_info(symbol)
+            price_precision = symbol_info.get("price_precision", 8)
+            qty_precision = symbol_info.get("qty_precision", 6)
+            logger.debug(f"Symbol {symbol} precision: price={price_precision}, qty={qty_precision}")
+        except Exception as e:
+            logger.warning(f"Could not get symbol info for {symbol}: {e}. Using defaults.")
+            price_precision = 8
+            qty_precision = 6
+
+        # Round and format stop price
+        stop_price_rounded = round(stop_price, price_precision)
+        stop_price_str = self._format_number(stop_price_rounded, price_precision)
+
+        params = {
+            "symbol": symbol,
+            "side": side_val,
+            "type": "STOP_MARKET",
+            "stopPrice": stop_price_str,
+            "workingType": "MARK_PRICE",
+        }
+
+        # If qty is provided, use it with reduceOnly, otherwise use closePosition
+        if qty is not None and qty > 0:
+            qty_rounded = round(qty, qty_precision)
+            qty_str = self._format_number(qty_rounded, qty_precision)
+            params["quantity"] = qty_str
+            params["reduceOnly"] = "true"
+        else:
+            params["closePosition"] = "true"
+
+        res = await client.futures_create_order(**params)
         return res
 
     @override
@@ -213,6 +257,13 @@ class BinanceFuturesAdapter(BaseExchangeAdapter):
         client = await self._get_client()
         res = await client.futures_cancel_all_open_orders(symbol=symbol)
         return res
+
+    @override
+    async def list_open_orders(self, symbol: str) -> list[dict[str, Any]]:
+        """List all open orders for a symbol."""
+        client = await self._get_client()
+        orders = await client.futures_get_open_orders(symbol=symbol)
+        return orders if isinstance(orders, list) else []
 
     @override
     async def set_leverage(self, symbol: str, leverage: int) -> dict[str, Any]:
@@ -263,13 +314,13 @@ class BinanceFuturesAdapter(BaseExchangeAdapter):
 
     @override
     async def place_sl_tp_orders(
-        self, symbol: str, side: TradeSide, stop_loss: float | None, take_profits: list[float], qty: float, tp_distribution: list[dict[str, Any]]
+        self, symbol: str, side: TradeSide, stop_loss: float | None, take_profits: list[float], qty: float, tp_distribution: dict[int, list[dict[str, Any]]]
     ) -> dict[str, Any]:
         """Place stop-loss and take-profit orders for a position.
 
         This method places conditional orders for risk management. Stop-loss uses
-        closePosition=true to close the entire position. Take-profits are split
-        equally across all TP levels.
+        closePosition=true to close the entire position. Take-profits are distributed
+        according to tp_distribution config or equally if not configured.
 
         Args:
             symbol: Trading pair symbol (e.g., 'BTCUSDT').
@@ -277,7 +328,7 @@ class BinanceFuturesAdapter(BaseExchangeAdapter):
             stop_loss: Stop-loss price, or None to skip.
             take_profits: List of take-profit prices.
             qty: Total position quantity to split across TPs.
-            tp_distribution: Distribution configuration (currently unused).
+            tp_distribution: Distribution configuration mapping {num_tps: [percentages]}.
 
         Returns:
             Dictionary with 'stop_loss' and 'take_profits' order responses.
@@ -300,8 +351,12 @@ class BinanceFuturesAdapter(BaseExchangeAdapter):
                         symbol=symbol, side=close_side, type="STOP_MARKET", stopPrice=format_price(stop_loss), closePosition="true", workingType="MARK_PRICE"
                     )
                     results["stop_loss"] = res
+                    logger.info(f"✅ SL order placed successfully for {symbol}")
+                else:
+                    # Validation failed - error already logged in _validate_sl_distance
+                    logger.error(f"❌ SL order NOT placed for {symbol} due to validation failure")
             except Exception as e:
-                logger.error(f"Error placing SL for {symbol}: {e}")
+                logger.error(f"❌ Exception while placing SL for {symbol}: {e}", exc_info=True)
 
         if take_profits:
             # Get current price for validation
@@ -325,14 +380,21 @@ class BinanceFuturesAdapter(BaseExchangeAdapter):
                 qty_precision = 2
                 min_qty = 1.0
 
-            each_qty = qty / len(take_profits)
+            # Calculate TP quantities using configured distribution
+            tp_quantities = calculate_tp_quantities(total_qty=qty, num_tps=len(take_profits), tp_distributions=tp_distribution)
 
-            # Check if each TP qty meets minimum requirement
-            if each_qty < min_qty:
-                logger.warning(f"Each TP qty {each_qty:.6f} is less than min_qty {min_qty}. Cannot split {qty} into {len(take_profits)} TPs. Skipping TP orders.")
-                return results
+            # Validate that all TP quantities meet minimum requirement
+            for i, tp_qty in enumerate(tp_quantities):
+                if tp_qty < min_qty:
+                    logger.warning(f"TP{i + 1} qty {tp_qty:.6f} is less than min_qty {min_qty}. Skipping this TP level.")
+                    # Set to 0 to skip this TP
+                    tp_quantities[i] = 0
 
-            for i, tp in enumerate(take_profits):
+            for i, (tp, tp_qty) in enumerate(zip(take_profits, tp_quantities)):
+                # Skip if quantity is 0 (below minimum)
+                if tp_qty == 0:
+                    continue
+
                 try:
                     # Validate TP price against current price
                     if current_price and not self._validate_tp_price(tp, current_price, side, i + 1):
@@ -340,7 +402,7 @@ class BinanceFuturesAdapter(BaseExchangeAdapter):
 
                     # Round and format
                     tp_rounded = round(tp, price_precision)
-                    qty_str = self._format_number(each_qty, qty_precision)
+                    qty_str = self._format_number(tp_qty, qty_precision)
                     tp_str = self._format_number(tp_rounded, price_precision)
 
                     logger.debug(f"TP{i + 1}: {tp} → {tp_str} (precision={price_precision}), qty={qty_str}")
@@ -377,3 +439,22 @@ class BinanceFuturesAdapter(BaseExchangeAdapter):
                     "min_qty": float(s["filters"][1]["minQty"]),  # LOT_SIZE filter
                 }
         return {"qty_precision": 3, "price_precision": 8, "min_qty": 0.001}
+
+    @override
+    async def get_order_status(self, symbol: str, order_id: str) -> dict[str, Any]:
+        """Get order status from Binance.
+
+        Args:
+            symbol: Trading pair symbol
+            order_id: Order ID to check
+
+        Returns:
+            Order information including status (NEW, FILLED, PARTIALLY_FILLED, CANCELED, etc.)
+        """
+        client = await self._get_client()
+        return await client.futures_get_order(symbol=symbol, orderId=order_id)
+
+    @override
+    async def close(self) -> None:
+        if self._client:
+            await self._client.close_connection()

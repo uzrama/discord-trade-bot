@@ -11,6 +11,7 @@ import orjson
 from discord_trade_bot.core.application.common.interfaces.repository import (
     StateRepositoryProtocol,
 )
+from discord_trade_bot.core.domain.entities.pending_entry import PendingEntryEntity
 from discord_trade_bot.core.domain.entities.position import ActivePositionEntity
 from discord_trade_bot.core.domain.value_objects.trading import (
     PositionStatus,
@@ -40,6 +41,16 @@ class SqliteStateRepository(StateRepositoryProtocol):
                 """
                 CREATE TABLE IF NOT EXISTS positions (
                     id TEXT PRIMARY KEY,
+                    data TEXT NOT NULL,
+                    status TEXT NOT NULL
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pending_entries (
+                    id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
                     data TEXT NOT NULL,
                     status TEXT NOT NULL
                 )
@@ -94,8 +105,8 @@ class SqliteStateRepository(StateRepositoryProtocol):
     async def get_open_positions_by_symbol_and_exchange(self, symbol: str, exchange: str) -> list[ActivePositionEntity]:
         async with aiosqlite.connect(self._db_file) as db:
             async with db.execute(
-                "SELECT data FROM positions WHERE status = ? AND json_extract(data, '$.symbol') = ? AND json_extract(data, '$.exchange') = ?",
-                (PositionStatus.OPEN.value, symbol, exchange),
+                "SELECT data FROM positions WHERE status IN (?, ?) AND json_extract(data, '$.symbol') = ? AND json_extract(data, '$.exchange') = ?",
+                (PositionStatus.OPEN.value, PositionStatus.WAITING_UPDATE.value, symbol, exchange),
             ) as cursor:
                 rows = await cursor.fetchall()
         return [pos for row in rows if (pos := self._deserialize_position(row))]
@@ -127,3 +138,75 @@ class SqliteStateRepository(StateRepositoryProtocol):
     async def append_trade_log(self, trade_data: dict[str, Any]) -> None:
         async with aiofiles.open(self._trades_file, mode="a", encoding="utf-8") as f:
             await f.write(orjson.dumps(trade_data).decode("utf-8") + "\n")
+
+    def _deserialize_pending_entry(self, row: Any) -> PendingEntryEntity | None:
+        """Deserialize a pending entry from database row.
+
+        Args:
+            row: Database row containing JSON data.
+
+        Returns:
+            Deserialized pending entry entity or None if parsing fails.
+        """
+        try:
+            data = orjson.loads(row[0])
+
+            # Restore types manually
+            if "side" in data and isinstance(data["side"], str):
+                data["side"] = TradeSide(data["side"])
+            if "created_at" in data and isinstance(data["created_at"], str):
+                data["created_at"] = datetime.fromisoformat(data["created_at"].replace("Z", "+00:00"))
+            if "tp_distribution" in data and isinstance(data["tp_distribution"], list):
+                data["tp_distribution"] = [TPDistributionRow(**tp) if isinstance(tp, dict) else tp for tp in data["tp_distribution"]]
+
+            return PendingEntryEntity(**data)
+        except Exception as e:
+            logger.error(f"Error parsing pending entry from DB: {e}")
+            return None
+
+    @override
+    async def save_pending_entry(self, entry: PendingEntryEntity) -> None:
+        """Save or update a pending entry."""
+        # If no id, generate it
+        if not entry.id:
+            entry.id = str(uuid.uuid4())
+        entry_id = str(entry.id)
+
+        # Serialize to JSON
+        data_json = orjson.dumps(entry, option=orjson.OPT_SERIALIZE_DATACLASS).decode("utf-8")
+        async with aiosqlite.connect(self._db_file) as db:
+            await db.execute(
+                """
+                INSERT INTO pending_entries (id, symbol, data, status)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    data=excluded.data,
+                    status=excluded.status
+                """,
+                (entry_id, entry.symbol, data_json, entry.status),
+            )
+            await db.commit()
+
+    @override
+    async def get_pending_entry_by_symbol(self, symbol: str) -> PendingEntryEntity | None:
+        """Retrieve a pending entry by symbol."""
+        async with aiosqlite.connect(self._db_file) as db:
+            async with db.execute("SELECT data FROM pending_entries WHERE symbol = ? AND status = ?", (symbol, "pending")) as cursor:
+                row = await cursor.fetchone()
+
+        return self._deserialize_pending_entry(row) if row else None
+
+    @override
+    async def get_all_pending_entries(self) -> list[PendingEntryEntity]:
+        """Retrieve all pending entries."""
+        async with aiosqlite.connect(self._db_file) as db:
+            async with db.execute("SELECT data FROM pending_entries WHERE status = ?", ("pending",)) as cursor:
+                rows = await cursor.fetchall()
+        return [entry for row in rows if (entry := self._deserialize_pending_entry(row))]
+
+    @override
+    async def delete_pending_entry(self, symbol: str) -> None:
+        """Delete a pending entry by symbol."""
+        async with aiosqlite.connect(self._db_file) as db:
+            await db.execute("DELETE FROM pending_entries WHERE symbol = ?", (symbol,))
+            await db.commit()

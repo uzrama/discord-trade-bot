@@ -8,6 +8,7 @@ from discord_trade_bot.main.config.env.bybit import BybitConfig
 from discord_trade_bot.main.config.env.discord import DiscordConfig
 from discord_trade_bot.main.config.env.redis import RedisConfig
 from discord_trade_bot.main.config.env.telegram import TelegramConfig
+from discord_trade_bot.main.config.yaml.fee import FeesConfig
 from discord_trade_bot.main.config.yaml.general import YamlSettings
 
 
@@ -18,6 +19,7 @@ class AppConfig(BaseSettings):
     discord: DiscordConfig = Field(default_factory=DiscordConfig)  # pyright: ignore[reportArgumentType]
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)  # pyright: ignore[reportArgumentType]
     redis: RedisConfig = Field(default_factory=RedisConfig)  # pyright: ignore[reportArgumentType]
+    fees: FeesConfig = Field(default_factory=FeesConfig)  # pyright: ignore[reportArgumentType]
 
     model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
         yaml_file="config.yaml",

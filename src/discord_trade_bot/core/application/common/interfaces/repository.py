@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
+from discord_trade_bot.core.domain.entities.pending_entry import PendingEntryEntity
 from discord_trade_bot.core.domain.entities.position import ActivePositionEntity
 
 
@@ -66,5 +67,44 @@ class StateRepositoryProtocol(ABC):
 
         Args:
             trade_data: Dictionary containing trade event information.
+        """
+        pass
+
+    @abstractmethod
+    async def save_pending_entry(self, entry: PendingEntryEntity) -> None:
+        """Save or update a pending entry.
+
+        Args:
+            entry: Pending entry entity to save or update.
+        """
+        pass
+
+    @abstractmethod
+    async def get_pending_entry_by_symbol(self, symbol: str) -> PendingEntryEntity | None:
+        """Retrieve a pending entry by symbol.
+
+        Args:
+            symbol: Trading pair symbol.
+
+        Returns:
+            The pending entry if found, None otherwise.
+        """
+        pass
+
+    @abstractmethod
+    async def get_all_pending_entries(self) -> list[PendingEntryEntity]:
+        """Retrieve all pending entries.
+
+        Returns:
+            List of all pending limit order entries.
+        """
+        pass
+
+    @abstractmethod
+    async def delete_pending_entry(self, symbol: str) -> None:
+        """Delete a pending entry by symbol.
+
+        Args:
+            symbol: Trading pair symbol.
         """
         pass

@@ -12,7 +12,7 @@ from discord_trade_bot.core.application.trading.use_cases.opening import (
     OpenPositionUseCase,
 )
 from discord_trade_bot.core.domain.entities.signal import ParsedSignalEntity
-from discord_trade_bot.core.domain.value_objects.trading import TradeSide
+from discord_trade_bot.core.domain.value_objects.trading import EntryMode, TradeSide
 
 
 @pytest.fixture
@@ -32,6 +32,9 @@ def mock_exchange_registry():
         }
     )
     exchange.place_market_order = AsyncMock(return_value={"orderId": "entry_123", "status": "FILLED"})
+    exchange.get_position = AsyncMock(return_value={"positionAmt": "0.001", "entryPrice": "50000.0"})
+    exchange.wait_for_position_ready = AsyncMock(return_value=True)
+    exchange.is_position_open = Mock(return_value=True)
     exchange.place_sl_tp_orders = AsyncMock(
         return_value={
             "stop_loss": {"orderId": "sl_123"},
@@ -49,9 +52,11 @@ def mock_exchange_registry():
 @pytest.fixture
 def open_position_use_case(mock_exchange_registry, mock_notification_gateway):
     """Create OpenPositionUseCase instance with mocked dependencies."""
+    mock_state_repository = Mock()
     return OpenPositionUseCase(
         exchange_registry=mock_exchange_registry,
         notification_gateway=mock_notification_gateway,
+        state_repository=mock_state_repository,
     )
 
 
@@ -82,6 +87,7 @@ def long_signal():
         symbol="BTCUSDT",
         side=TradeSide.LONG,
         entry_price=50000.0,
+        entry_mode=EntryMode.EXACT_PRICE,
         stop_loss=48000.0,
         take_profits=[51000.0, 52000.0, 53000.0],
         leverage=20,
@@ -100,6 +106,7 @@ def short_signal():
         symbol="ETHUSDT",
         side=TradeSide.SHORT,
         entry_price=3000.0,
+        entry_mode=EntryMode.EXACT_PRICE,
         stop_loss=3100.0,
         take_profits=[2950.0, 2900.0, 2850.0],
         leverage=10,
@@ -146,8 +153,13 @@ class TestOpenPositionUseCase:
         short_signal,
         trade_settings,
         mock_notification_gateway,
+        mock_exchange_registry,
     ):
         """Test successfully opening a SHORT position."""
+        exchange = mock_exchange_registry.get_exchange("binance")
+        # Mock SHORT position (negative positionAmt)
+        exchange.get_position.return_value = {"positionAmt": "-0.001", "entryPrice": "3000.0"}
+
         result = await open_position_use_case.execute(short_signal, trade_settings)
 
         assert result.success is True
@@ -244,7 +256,7 @@ class TestOpenPositionUseCase:
         result = await open_position_use_case.execute(long_signal, trade_settings)
 
         assert result.success is False
-        assert "Failed to place entry order" in result.reason
+        assert "Failed to place market order" in result.reason
 
     @pytest.mark.asyncio
     @patch("asyncio.sleep", new_callable=AsyncMock)
@@ -311,6 +323,7 @@ class TestOpenPositionUseCase:
             message_text="BTCUSDT LONG",
             symbol="BTCUSDT",
             side=TradeSide.LONG,
+            entry_mode=EntryMode.CMP,
             stop_loss=None,  # No SL in signal
             is_signal=True,
         )
@@ -341,12 +354,15 @@ class TestOpenPositionUseCase:
             message_text="BTCUSDT SHORT",
             symbol="BTCUSDT",
             side=TradeSide.SHORT,
+            entry_mode=EntryMode.CMP,
             stop_loss=None,  # No SL in signal
             is_signal=True,
         )
 
         exchange = mock_exchange_registry.get_exchange("binance")
         exchange.get_last_price.return_value = 50000.0
+        # Mock SHORT position (negative positionAmt)
+        exchange.get_position.return_value = {"positionAmt": "-0.001", "entryPrice": "50000.0"}
 
         result = await open_position_use_case.execute(signal, trade_settings)
 
@@ -445,18 +461,61 @@ class TestOpenPositionUseCase:
 
     @pytest.mark.asyncio
     @patch("asyncio.sleep", new_callable=AsyncMock)
-    async def test_waits_for_entry_fill(
+    async def test_waits_for_position_confirmation(
         self,
         mock_sleep,
         open_position_use_case,
         long_signal,
         trade_settings,
+        mock_exchange_registry,
     ):
-        """Test that use case waits for entry order to fill."""
-        await open_position_use_case.execute(long_signal, trade_settings)
+        """Test that use case waits for position to be confirmed."""
+        exchange = mock_exchange_registry.get_exchange("binance")
 
-        # Verify sleep was called to wait for fill
-        mock_sleep.assert_called_once_with(1.5)
+        # Mock wait_for_position_ready to simulate waiting
+        exchange.wait_for_position_ready = AsyncMock(return_value=True)
+
+        result = await open_position_use_case.execute(long_signal, trade_settings)
+
+        assert result.success is True
+        assert exchange.wait_for_position_ready.call_count == 1
+        exchange.wait_for_position_ready.assert_called_once_with(
+            symbol="BTCUSDT",
+            side=TradeSide.LONG,
+            timeout=10.0,
+            check_interval=0.5,
+        )
+
+    @pytest.mark.asyncio
+    @patch("asyncio.sleep", new_callable=AsyncMock)
+    @patch("time.time")
+    async def test_position_timeout_handling(
+        self,
+        mock_time,
+        mock_sleep,
+        open_position_use_case,
+        long_signal,
+        trade_settings,
+        mock_exchange_registry,
+        mock_notification_gateway,
+    ):
+        """Test handling when position doesn't appear within timeout."""
+        exchange = mock_exchange_registry.get_exchange("binance")
+
+        # Mock wait_for_position_ready to return False (timeout)
+        exchange.wait_for_position_ready = AsyncMock(return_value=False)
+
+        result = await open_position_use_case.execute(long_signal, trade_settings)
+
+        # Should still return success (order placed) but without SL/TP
+        assert result.success is True
+        assert result.sl_tp_res == {}
+        assert result.final_sl is None
+
+        # Should send critical notification
+        mock_notification_gateway.send_message.assert_called()
+        call_args = mock_notification_gateway.send_message.call_args_list
+        assert any("CRITICAL" in str(call) for call in call_args)
 
     @pytest.mark.asyncio
     @patch("asyncio.sleep", new_callable=AsyncMock)

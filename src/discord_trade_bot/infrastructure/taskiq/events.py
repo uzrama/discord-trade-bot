@@ -1,4 +1,5 @@
 import logging
+
 from dishka.integrations.taskiq import setup_dishka
 from taskiq import TaskiqEvents
 

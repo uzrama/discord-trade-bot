@@ -20,7 +20,11 @@ def mock_exchange_for_tracking():
     exchange = AsyncMock()
     exchange.name = "binance"
     exchange.cancel_order = AsyncMock(return_value={"orderId": "cancelled"})
-    exchange.place_stop_market_order = AsyncMock(return_value={"orderId": "new_sl_123"})
+    exchange.place_stop_market_order = AsyncMock(return_value={"orderId": "new_sl_123", "algoId": "new_sl_123"})
+    exchange.get_position = AsyncMock(return_value={"positionAmt": "0.1", "entryPrice": "50000"})
+    exchange.get_last_price = AsyncMock(return_value=51000.0)
+    exchange.place_market_order = AsyncMock(return_value={"orderId": "market_close_123"})
+    exchange.get_symbol_info = AsyncMock(return_value={"qty_precision": 3, "price_precision": 2, "min_qty": 0.001})
     return exchange
 
 
@@ -37,22 +41,26 @@ def tracker_use_case(
     mock_exchange_registry_for_tracking,
     mock_repository,
     mock_notification_gateway,
+    mock_app_config,
 ):
     """Create ProcessTrackerEventUseCase instance with mocked dependencies."""
     return ProcessTrackerEventUseCase(
         exchange_registry=mock_exchange_registry_for_tracking,
         state_repository=mock_repository,
         notification_gateway=mock_notification_gateway,
+        config=mock_app_config,
     )
 
 
 @pytest.fixture
 def open_position_with_tps():
     """Create an open position with TP orders."""
+    from discord_trade_bot.core.domain.value_objects.trading import TPDistributionRow
+
     return ActivePositionEntity(
         id="pos_123",
         symbol="BTCUSDT",
-        source_id="channel_123",
+        source_id="test_channel_123",
         message_id="msg_456",
         exchange="binance",
         side=TradeSide.LONG,
@@ -60,6 +68,11 @@ def open_position_with_tps():
         entry_price=50000.0,
         stop_loss=48000.0,
         take_profits=[51000.0, 52000.0, 53000.0],
+        tp_distribution=[
+            TPDistributionRow(label="tp1", close_pct=33.33),
+            TPDistributionRow(label="tp2", close_pct=33.33),
+            TPDistributionRow(label="tp3", close_pct=33.34),
+        ],
         tp_order_ids={
             "tp_order_1": 51000.0,
             "tp_order_2": 52000.0,
@@ -84,10 +97,13 @@ class TestProcessTrackerEventUseCase:
         mock_exchange_for_tracking,
         open_position_with_tps,
     ):
-        """Test that first TP hit moves SL to breakeven."""
+        """Test that first TP hit moves SL to TP1 level."""
         # Setup repository to return position
         mock_repository.get_open_positions.return_value = [open_position_with_tps]
         mock_repository.get_position_by_id.return_value = open_position_with_tps
+
+        # Set current price higher than TP1 so SL at TP1 level is valid
+        mock_exchange_for_tracking.get_last_price.return_value = 51500.0
 
         # Create TP hit event
         event = {
@@ -103,24 +119,28 @@ class TestProcessTrackerEventUseCase:
         # Verify old SL was cancelled
         mock_exchange_for_tracking.cancel_order.assert_called_once_with("BTCUSDT", "sl_order_123")
 
-        # Verify new SL was placed at breakeven
+        # Verify new SL was placed at TP1 level (with fee adjustment)
         mock_exchange_for_tracking.place_stop_market_order.assert_called_once()
         call_args = mock_exchange_for_tracking.place_stop_market_order.call_args
         assert call_args.kwargs["symbol"] == "BTCUSDT"
-        assert call_args.kwargs["stop_price"] == 50000.0  # Entry price
+        # SL should be at TP1 level (51000) minus fees
+        assert call_args.kwargs["stop_price"] < 51000.0  # Below TP1 due to fees
+        assert call_args.kwargs["stop_price"] > 50900.0  # But close to TP1
 
         # Verify position was updated
         mock_repository.save_position.assert_called_once()
         saved_position = mock_repository.save_position.call_args[0][0]
         assert saved_position.tp_index_hit == 1
         assert saved_position.breakeven_applied is True
-        assert saved_position.break_even_price == 50000.0
+        # SL is at TP1 level minus fees
+        assert saved_position.break_even_price < 51000.0
+        assert saved_position.break_even_price > 50900.0
         assert saved_position.sl_order_id == "new_sl_123"
 
         # Verify notification was sent
         mock_notification_gateway.send_message.assert_called_once()
         message = mock_notification_gateway.send_message.call_args[0][0]
-        assert "breakeven" in message.lower()
+        assert "tp1" in message.lower()
 
     @pytest.mark.asyncio
     async def test_second_tp_hit_does_not_move_sl_again(
@@ -302,6 +322,9 @@ class TestProcessTrackerEventUseCase:
         mock_repository.get_open_positions.return_value = [open_position_with_tps]
         mock_repository.get_position_by_id.return_value = open_position_with_tps
 
+        # Set current price higher than TP1 so SL at TP1 level is valid
+        mock_exchange_for_tracking.get_last_price.return_value = 51500.0
+
         # Mock cancellation failure
         mock_exchange_for_tracking.cancel_order.side_effect = Exception("Cancel failed")
 
@@ -327,11 +350,14 @@ class TestProcessTrackerEventUseCase:
         mock_exchange_for_tracking,
         open_position_with_tps,
     ):
-        """Test handling of SL placement failure during breakeven move."""
+        """Test handling of SL placement failure during breakeven move - should trigger emergency close."""
         mock_repository.get_open_positions.return_value = [open_position_with_tps]
         mock_repository.get_position_by_id.return_value = open_position_with_tps
 
-        # Mock placement failure
+        # Set current price higher than TP1 so SL at TP1 level is valid
+        mock_exchange_for_tracking.get_last_price.return_value = 51500.0
+
+        # Mock placement failure for both attempts (calculated BE and fallback)
         mock_exchange_for_tracking.place_stop_market_order.side_effect = Exception("Placement failed")
 
         event = {
@@ -342,19 +368,22 @@ class TestProcessTrackerEventUseCase:
             }
         }
 
-        # Should raise exception
-        with pytest.raises(Exception, match="Placement failed"):
-            await tracker_use_case.execute(event)
+        # Should NOT raise exception - instead should close position via emergency
+        await tracker_use_case.execute(event)
 
-        # Verify error notification was sent
+        # Verify emergency close was triggered
+        mock_exchange_for_tracking.place_market_order.assert_called_once()
+
+        # Verify emergency notification was sent
         assert mock_notification_gateway.send_message.call_count >= 1
-        error_message = None
+        emergency_message = None
         for call in mock_notification_gateway.send_message.call_args_list:
             msg = call[0][0]
-            if "Error moving SL" in msg:
-                error_message = msg
+            if "EMERGENCY" in msg:
+                emergency_message = msg
                 break
-        assert error_message is not None
+        assert emergency_message is not None
+        assert "Position closed" in emergency_message
 
     @pytest.mark.asyncio
     async def test_multiple_positions_same_symbol(
@@ -446,10 +475,12 @@ class TestProcessTrackerEventUseCase:
         mock_exchange_for_tracking,
     ):
         """Test tracking for SHORT positions."""
+        from discord_trade_bot.core.domain.value_objects.trading import TPDistributionRow
+
         short_position = ActivePositionEntity(
             id="pos_short",
             symbol="ETHUSDT",
-            source_id="channel_123",
+            source_id="test_channel_123",  # Match mock_app_config
             message_id="msg_456",
             exchange="binance",
             side=TradeSide.SHORT,
@@ -457,6 +488,10 @@ class TestProcessTrackerEventUseCase:
             entry_price=3000.0,
             stop_loss=3100.0,
             take_profits=[2950.0, 2900.0],
+            tp_distribution=[
+                TPDistributionRow(label="tp1", close_pct=50.0),
+                TPDistributionRow(label="tp2", close_pct=50.0),
+            ],
             tp_order_ids={
                 "tp_order_1": 2950.0,
                 "tp_order_2": 2900.0,
@@ -470,6 +505,9 @@ class TestProcessTrackerEventUseCase:
         mock_repository.get_open_positions.return_value = [short_position]
         mock_repository.get_position_by_id.return_value = short_position
 
+        # Set current price for SHORT position (below TP1, so SL at TP1 level is valid)
+        mock_exchange_for_tracking.get_last_price.return_value = 2900.0
+
         event = {
             "o": {
                 "i": "tp_order_1",
@@ -480,8 +518,10 @@ class TestProcessTrackerEventUseCase:
 
         await tracker_use_case.execute(event)
 
-        # Verify breakeven SL was placed at entry price
+        # Verify SL was placed at TP1 level (with fee adjustment, above TP1 for SHORT)
         mock_exchange_for_tracking.place_stop_market_order.assert_called_once()
         call_args = mock_exchange_for_tracking.place_stop_market_order.call_args
-        assert call_args.kwargs["stop_price"] == 3000.0
+        # For SHORT, SL at TP1 level (2950) plus fees
+        assert call_args.kwargs["stop_price"] > 2950.0  # Above TP1 due to fees
+        assert call_args.kwargs["stop_price"] < 3000.0  # But below entry
         assert call_args.kwargs["side"] == TradeSide.SHORT

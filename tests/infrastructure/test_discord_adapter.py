@@ -29,10 +29,12 @@ def mock_callback():
 def discord_adapter(mock_callback):
     """Create DiscordSelfAdapter with mocked dependencies."""
     watched_channels = {999888777, 111222333}
+    channel_to_source_map = {999888777: "test_source_1", 111222333: "test_source_2"}
     adapter = DiscordSelfAdapter(
         token="test_token",
         on_message_callback=mock_callback,
         watched_channel_ids=watched_channels,
+        channel_to_source_map=channel_to_source_map,
     )
     return adapter
 
@@ -43,16 +45,19 @@ class TestDiscordSelfAdapter:
     def test_init_with_parameters(self, mock_callback):
         """Test initialization with all parameters."""
         watched_channels = {123, 456, 789}
+        channel_to_source_map = {123: "source_1", 456: "source_2", 789: "source_3"}
 
         adapter = DiscordSelfAdapter(
             token="my_token",
             on_message_callback=mock_callback,
             watched_channel_ids=watched_channels,
+            channel_to_source_map=channel_to_source_map,
         )
 
         assert adapter._token == "my_token"
         assert adapter._on_message_callback == mock_callback
         assert adapter._watched_channel_ids == watched_channels
+        assert adapter._channel_to_source_map == channel_to_source_map
 
     def test_init_with_empty_watched_channels(self, mock_callback):
         """Test initialization with empty watched channels."""
@@ -60,9 +65,11 @@ class TestDiscordSelfAdapter:
             token="test_token",
             on_message_callback=mock_callback,
             watched_channel_ids=set(),
+            channel_to_source_map={},
         )
 
         assert adapter._watched_channel_ids == set()
+        assert adapter._channel_to_source_map == {}
 
     @pytest.mark.asyncio
     async def test_on_message_from_watched_channel(self, discord_adapter, mock_discord_message, mock_callback):
@@ -94,6 +101,7 @@ class TestDiscordSelfAdapter:
         dto = call_args[0]
 
         assert isinstance(dto, ProcessSignalDTO)
+        assert dto.source_id == "test_source_1"
         assert dto.channel_id == "999888777"
         assert dto.message_id == "123456789"
         assert dto.text == "BTCUSDT LONG Entry: 50000"
@@ -158,10 +166,12 @@ class TestDiscordSelfAdapter:
     async def test_on_message_multiple_watched_channels(self, mock_callback):
         """Test processing messages from multiple watched channels."""
         watched_channels = {111, 222, 333}
+        channel_to_source_map = {111: "source_1", 222: "source_2", 333: "source_3"}
         adapter = DiscordSelfAdapter(
             token="test_token",
             on_message_callback=mock_callback,
             watched_channel_ids=watched_channels,
+            channel_to_source_map=channel_to_source_map,
         )
 
         # Create messages from different channels

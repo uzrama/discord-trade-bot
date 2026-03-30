@@ -35,7 +35,24 @@ class ExchangeGatewayProtocol(ABC):
         pass
 
     @abstractmethod
-    async def place_stop_market_order(self, symbol: str, side: TradeSide, stop_price: float) -> dict[str, Any]:
+    async def place_stop_market_order(
+        self,
+        symbol: str,
+        side: TradeSide,
+        stop_price: float,
+        qty: float | None = None,
+    ) -> dict[str, Any]:
+        """Place a stop market order.
+
+        Args:
+            symbol: Trading pair symbol
+            side: Position side (LONG or SHORT)
+            stop_price: Stop trigger price
+            qty: Optional quantity. If None, uses closePosition=true
+
+        Returns:
+            Order response from exchange
+        """
         pass
 
     @abstractmethod
@@ -62,7 +79,7 @@ class ExchangeGatewayProtocol(ABC):
         stop_loss: float | None,
         take_profits: list[float],
         qty: float,
-        tp_distribution: list[dict[str, Any]],
+        tp_distribution: dict[int, list[dict[str, Any]]],
     ) -> dict[str, Any]:
         pass
 
@@ -75,7 +92,66 @@ class ExchangeGatewayProtocol(ABC):
         pass
 
     @abstractmethod
+    async def list_open_orders(self, symbol: str) -> list[dict[str, Any]]:
+        """List all open orders for a symbol.
+
+        Args:
+            symbol: Trading pair symbol
+
+        Returns:
+            List of open orders with at least 'orderId' field
+        """
+        pass
+
+    @abstractmethod
+    async def get_order_status(self, symbol: str, order_id: str) -> dict[str, Any]:
+        """Get order status from exchange.
+
+        Args:
+            symbol: Trading pair symbol
+            order_id: Order ID to check
+
+        Returns:
+            Order information including status (NEW, FILLED, CANCELLED, etc.)
+        """
+        pass
+
+    @abstractmethod
     async def close(self) -> None:
+        pass
+
+    @abstractmethod
+    def is_position_open(self, position: dict[str, Any], side: TradeSide) -> bool:
+        """Check if position is open based on exchange data.
+
+        Args:
+            position: Position data from exchange
+            side: Expected position side
+
+        Returns:
+            True if position is open in the correct direction
+        """
+        pass
+
+    @abstractmethod
+    async def wait_for_position_ready(
+        self,
+        symbol: str,
+        side: TradeSide,
+        timeout: float = 10.0,
+        check_interval: float = 0.5,
+    ) -> bool:
+        """Wait for position to appear on exchange after order fill.
+
+        Args:
+            symbol: Trading symbol
+            side: Position side (LONG/SHORT)
+            timeout: Maximum wait time in seconds
+            check_interval: Interval between checks in seconds
+
+        Returns:
+            True if position found, False if timeout
+        """
         pass
 
 

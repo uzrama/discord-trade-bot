@@ -21,7 +21,8 @@ class Source(BaseModel):
     cancel_reentry_on_tp2: bool = True
     place_reentry_after_tp1: bool = True
     move_stop_to_tp1_on_tp3: bool = True
-    tp_distribution: list[TpDistribution] = Field(default_factory=list)
+    tp_distribution: list[TpDistribution] = Field(default_factory=list)  # Deprecated, use tp_distributions
+    tp_distributions: dict[int, list[TpDistribution]] = Field(default_factory=dict)
 
 
 class DiscordYamlConfig(BaseModel):

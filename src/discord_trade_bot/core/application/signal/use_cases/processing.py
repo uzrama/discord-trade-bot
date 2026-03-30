@@ -1,5 +1,5 @@
 import logging
-from typing import final
+from typing import Any, final
 
 from discord_trade_bot.core.application.common.interfaces.notification import (
     NotificationGatewayProtocol,
@@ -11,13 +11,17 @@ from discord_trade_bot.core.application.signal.dto import (
     ProcessSignalDTO,
     SignalProcessingResultDTO,
 )
+from discord_trade_bot.core.application.signal.use_cases.update import (
+    HandleSignalUpdateUseCase,
+)
 from discord_trade_bot.core.application.trading.dto import TradeSettingsDTO
 from discord_trade_bot.core.application.trading.interfaces import (
-    ExchangeGatewayProtocol,
+    ExchangeRegistryProtocol,
 )
 from discord_trade_bot.core.application.trading.use_cases import OpenPositionUseCase
 from discord_trade_bot.core.domain.entities.position import ActivePositionEntity
 from discord_trade_bot.core.domain.services.parser import SignalParserService
+from discord_trade_bot.core.domain.value_objects.trading import PositionStatus
 from discord_trade_bot.main.config.app import AppConfig
 
 logger = logging.getLogger(__name__)
@@ -42,18 +46,24 @@ class ProcessSignalUseCase:
 
     def __init__(
         self,
-        exchange_gateway: ExchangeGatewayProtocol,
+        exchange_registry: ExchangeRegistryProtocol,
         notification_gateway: NotificationGatewayProtocol,
         state_repository: StateRepositoryProtocol,
         open_position_use_case: OpenPositionUseCase,
         config: AppConfig,
     ):
-        self._exchange_gateway = exchange_gateway
+        self._exchange_registry = exchange_registry
         self._notification_gateway = notification_gateway
         self._state_repository = state_repository
         self._open_position_use_case = open_position_use_case
         self._config = config
         self._parser = SignalParserService()
+        self._handle_signal_update_use_case = HandleSignalUpdateUseCase(
+            exchange_registry=exchange_registry,
+            notification_gateway=notification_gateway,
+            state_repository=state_repository,
+            config=config,
+        )
 
     async def execute(self, dto: ProcessSignalDTO) -> SignalProcessingResultDTO:
         """Process a trading signal and open a position if valid.
@@ -76,10 +86,15 @@ class ProcessSignalUseCase:
             can be traded on different exchanges simultaneously.
         """
         sig = self._parser.parse(dto.channel_id, dto.message_id, dto.text)
-
         if not sig.is_signal or not sig.symbol or not sig.side:
             return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason="Invalid signal")
-        # Decision logic: is it a primary signal?
+
+        # Decision logic: is it a primary signal or an update?
+        if sig.signal_type == "signal_update":
+            # Handle signal update (edited message with new SL/TP)
+            logger.info(f"Processing signal update for {sig.symbol}")
+            return await self._handle_signal_update_use_case.execute(sig, dto)
+
         if sig.signal_type == "primary_signal":
             # Get source config
             watch_sources = self._config.yaml.discord.watch_sources
@@ -93,7 +108,14 @@ class ProcessSignalUseCase:
             existing_positions = await self._state_repository.get_open_positions_by_symbol_and_exchange(symbol=sig.symbol, exchange=source_cfg.exchange)
 
             if existing_positions:
-                # Position already open, ignore new signal
+                # Check if this is an edited message (same message_id as existing position)
+                for existing_pos in existing_positions:
+                    if existing_pos.message_id == dto.message_id:
+                        # This is an edited message, treat as signal update
+                        logger.info(f"Detected edited message for {sig.symbol} (message_id: {dto.message_id}), processing as update")
+                        return await self._handle_signal_update_use_case.execute(sig, dto)
+
+                # If we reach here, it's a duplicate (different message_id)
                 existing_pos = existing_positions[0]
                 warning_msg = (
                     f"⚠️ Position for {sig.symbol} is already open on {source_cfg.exchange}\nEntry: {existing_pos.entry_price}\nQty: {existing_pos.qty}\nNew signal ignored."
@@ -104,12 +126,25 @@ class ProcessSignalUseCase:
                 return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Duplicate position: {sig.symbol} already open on {source_cfg.exchange}")
 
             logger.info(f"Opening position: {sig.symbol} {sig.side} [Leverage: {sig.leverage}] [Entry price: {sig.entry_price}]")
+
+            # Convert tp_distribution or tp_distributions to the new format
+            tp_distributions_dict: dict[int, list[dict[str, Any]]] = {}
+
+            # Check if new format exists
+            if source_cfg.tp_distributions:
+                tp_distributions_dict = {k: [tp.model_dump() for tp in v] for k, v in source_cfg.tp_distributions.items()}
+            # Fallback to old format for backward compatibility
+            # elif source_cfg.tp_distribution:
+            #     # Convert old format to new format: use length as key
+            #     num_tps = len(source_cfg.tp_distribution)
+            #     tp_distributions_dict = {num_tps: [tp.model_dump() for tp in source_cfg.tp_distribution]}
+
             settings = TradeSettingsDTO(
                 exchange=source_cfg.exchange,
                 fixed_leverage=source_cfg.fixed_leverage,
                 free_balance_pct=source_cfg.free_balance_pct,
                 default_sl_percent=source_cfg.default_sl_percent,
-                tp_distribution=[tp.model_dump() for tp in source_cfg.tp_distribution],
+                tp_distribution=tp_distributions_dict,
             )
             res = await self._open_position_use_case.execute(sig, settings)
             if not res.success:
@@ -119,17 +154,26 @@ class ProcessSignalUseCase:
                 entry_order_id = str(res.order.get("orderId", "")) if res.order else ""
                 sl_tp_res = res.sl_tp_res or {}
                 sl_order = sl_tp_res.get("stop_loss")
-                sl_order_id = str(sl_order.get("orderId", "")) if sl_order else None
+                # Binance Futures returns algoId for conditional orders (SL/TP)
+                sl_order_id = str(sl_order.get("algoId") or sl_order.get("orderId") or "") if sl_order else None
 
                 tp_order_ids = {}
                 for i, tp_order in enumerate(sl_tp_res.get("take_profits", [])):
-                    if "orderId" in tp_order and i < len(sig.take_profits):
+                    # Binance Futures returns algoId for conditional orders
+                    order_id = tp_order.get("algoId") or tp_order.get("orderId")
+                    if order_id and i < len(sig.take_profits):
                         tp_price = float(sig.take_profits[i])
-                        tp_order_ids[str(tp_order["orderId"])] = tp_price
+                        tp_order_ids[str(order_id)] = tp_price
+                # Determine if position needs to wait for signal updates
+                # If signal has no SL/TP, mark position as waiting for updates
+                needs_signal_stop_update = sig.stop_loss is None and res.final_sl is None
+                needs_signal_tp_update = not sig.take_profits
+
+                position_status = PositionStatus.WAITING_UPDATE if (needs_signal_stop_update or needs_signal_tp_update) else PositionStatus.OPEN
 
                 position = ActivePositionEntity(
                     symbol=sig.symbol,
-                    source_id=dto.channel_id,
+                    source_id=dto.source_id,
                     message_id=dto.message_id,
                     exchange=source_cfg.exchange,
                     side=sig.side,
@@ -140,11 +184,25 @@ class ProcessSignalUseCase:
                     order_id=entry_order_id,
                     sl_order_id=sl_order_id,
                     tp_order_ids=tp_order_ids,
+                    # Initialize tracking fields for breakeven calculation
+                    remaining_qty=res.qty,  # Initially equals full quantity
+                    closed_qty=0.0,
+                    realized_pnl_usdt=0.0,
+                    # Signal update tracking fields
+                    status=position_status,
+                    message_hash=sig.message_hash,
+                    needs_signal_stop_update=needs_signal_stop_update,
+                    needs_signal_tp_update=needs_signal_tp_update,
+                    temporary_stop=res.final_sl if needs_signal_stop_update else None,
                 )
 
                 # Save it
                 await self._state_repository.save_position(position)
-                logger.info(f"✅ Position {sig.symbol} saved to SQLite DB for tracking.")
+
+                if position_status == PositionStatus.WAITING_UPDATE:
+                    logger.info(f"✅ Position {sig.symbol} saved with status WAITING_UPDATE (needs_stop={needs_signal_stop_update}, needs_tp={needs_signal_tp_update})")
+                else:
+                    logger.info(f"✅ Position {sig.symbol} saved to SQLite DB for tracking.")
         else:
             logger.info(f"INFO This is an update or not a primary signal (type: {sig.signal_type}). Symbol: {sig.symbol}")
 

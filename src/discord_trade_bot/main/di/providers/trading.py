@@ -70,11 +70,13 @@ class TradingProvider(Provider):
         exchange_registry: ExchangeRegistryProtocol,
         state_repository: StateRepositoryProtocol,
         notification_gateway: NotificationGatewayProtocol,
+        config: AppConfig,
     ) -> ProcessTrackerEventUseCase:
         return ProcessTrackerEventUseCase(
             exchange_registry=exchange_registry,
             state_repository=state_repository,
             notification_gateway=notification_gateway,
+            config=config,
         )
 
     @provide(scope=Scope.APP)
@@ -90,20 +92,25 @@ class TradingProvider(Provider):
         self,
         exchange_registry: ExchangeRegistryProtocol,
         notification_gateway: NotificationGatewayProtocol,
+        state_repository: StateRepositoryProtocol,
     ) -> OpenPositionUseCase:
-        return OpenPositionUseCase(exchange_registry=exchange_registry, notification_gateway=notification_gateway)
+        return OpenPositionUseCase(
+            exchange_registry=exchange_registry,
+            notification_gateway=notification_gateway,
+            state_repository=state_repository,
+        )
 
     @provide(scope=Scope.APP)
     def get_process_signal_use_case(
         self,
         config: AppConfig,
-        exchange_gateway: ExchangeGatewayProtocol,
+        exchange_registry: ExchangeRegistryProtocol,
         notification_gateway: NotificationGatewayProtocol,
         state_repository: StateRepositoryProtocol,
         open_position_use_case: OpenPositionUseCase,
     ) -> ProcessSignalUseCase:
         return ProcessSignalUseCase(
-            exchange_gateway=exchange_gateway,
+            exchange_registry=exchange_registry,
             notification_gateway=notification_gateway,
             state_repository=state_repository,
             open_position_use_case=open_position_use_case,

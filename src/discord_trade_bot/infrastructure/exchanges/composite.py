@@ -52,8 +52,8 @@ class CompositeExchangeGateway(ExchangeGatewayProtocol, ExchangeRegistryProtocol
         return await self._get_default_exchange().place_limit_order(symbol, side, qty, price, reduce_only)
 
     @override
-    async def place_stop_market_order(self, symbol: str, side: TradeSide, stop_price: float) -> dict[str, Any]:
-        return await self._get_default_exchange().place_stop_market_order(symbol, side, stop_price)
+    async def place_stop_market_order(self, symbol: str, side: TradeSide, stop_price: float, qty: float | None = None) -> dict[str, Any]:
+        return await self._get_default_exchange().place_stop_market_order(symbol, side, stop_price, qty)
 
     @override
     async def cancel_order(self, symbol: str, order_id: str | int) -> dict[str, Any]:
@@ -73,13 +73,21 @@ class CompositeExchangeGateway(ExchangeGatewayProtocol, ExchangeRegistryProtocol
 
     @override
     async def place_sl_tp_orders(
-        self, symbol: str, side: TradeSide, stop_loss: float | None, take_profits: list[float], qty: float, tp_distribution: list[dict[str, Any]]
+        self, symbol: str, side: TradeSide, stop_loss: float | None, take_profits: list[float], qty: float, tp_distribution: dict[int, list[dict[str, Any]]]
     ) -> dict[str, Any]:
         return await self._get_default_exchange().place_sl_tp_orders(symbol, side, stop_loss, take_profits, qty, tp_distribution)
 
     @override
     async def get_symbol_info(self, symbol: str) -> dict[str, Any]:
         return await self._get_default_exchange().get_symbol_info(symbol)
+
+    @override
+    async def list_open_orders(self, symbol: str) -> list[dict[str, Any]]:
+        return await self._get_default_exchange().list_open_orders(symbol)
+
+    @override
+    async def get_order_status(self, symbol: str, order_id: str) -> dict[str, Any]:
+        return await self._get_default_exchange().get_order_status(symbol, order_id)
 
     async def close(self):
         for adapter in self._exchanges.values():

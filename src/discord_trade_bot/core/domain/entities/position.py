@@ -46,6 +46,12 @@ class ActivePositionEntity:
     status: PositionStatus = PositionStatus.OPEN
     order_id: str | None = None
 
+    # Fields for tracking signal updates (like bot_fixed)
+    message_hash: str | None = None
+    needs_signal_stop_update: bool = False
+    needs_signal_tp_update: bool = False
+    temporary_stop: float | None = None
+
     def __post_init__(self):
         if not self.id:
             self.id = str(uuid.uuid4())

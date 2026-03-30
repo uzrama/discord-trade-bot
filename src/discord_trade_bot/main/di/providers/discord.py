@@ -16,13 +16,14 @@ class DiscordProvider(Provider):
     async def get_discord_client(self, config: AppConfig) -> AsyncIterable[DiscordSelfAdapter]:
         watch_sources = config.yaml.discord.watch_sources
         watched_channel_ids: set[int] = {s.channel_id for s in watch_sources if s.enabled}
+        channel_to_source_map: dict[int, str] = {s.channel_id: s.source_id for s in watch_sources if s.enabled}
         token = config.discord.token.get_secret_value()
 
         async def on_message_wrapper(dto: ProcessSignalDTO):
             # Send task to Redis queue (pass as separate parameters for MSGPack serialization)
-            await process_signal_task.kiq(channel_id=dto.channel_id, message_id=dto.message_id, text=dto.text)
+            await process_signal_task.kiq(source_id=dto.source_id, channel_id=dto.channel_id, message_id=dto.message_id, text=dto.text)
 
-        client = DiscordSelfAdapter(token=token, on_message_callback=on_message_wrapper, watched_channel_ids=watched_channel_ids)
+        client = DiscordSelfAdapter(token=token, on_message_callback=on_message_wrapper, watched_channel_ids=watched_channel_ids, channel_to_source_map=channel_to_source_map)
         yield client
         await client.stop_client()
 

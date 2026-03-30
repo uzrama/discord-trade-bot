@@ -1,35 +1,59 @@
 general:
-  mode: testnet
+  mode: production
 discord:
   watch_sources:
     - source_id: discord_source_1
       enabled: true
-      channel_id: 1234567890123456789 # Replace with your Discord channel ID
-      exchange: binance
-      free_balance_pct: 10
-      fixed_leverage: 20
-      default_sl_percent: 10
-      position_size_pct: 10
+      channel_id: 1483388521925578785 # Replace with your Discord channel ID
+      exchange: bybit
+      free_balance_pct: 1
+      fixed_leverage: 5
+      default_sl_percent: 0.5
+      position_size_pct: 5
       stale_signal_seconds: 120
       max_price_deviation_pct: 2.0
       move_to_breakeven_on_tp1: true
       cancel_reentry_on_tp2: true
       place_reentry_after_tp1: true
       move_stop_to_tp1_on_tp3: true
-      tp_distribution:
-        - label: tp1
-          close_pct: 25
-        - label: tp2
-          close_pct: 25
-        - label: tp3
-          close_pct: 25
-        - label: tp4
-          close_pct: 25
+      tp_distributions:
+        3: # Для сигналов с 3 TP
+          - label: tp1
+            close_pct: 50
+          - label: tp2
+            close_pct: 30
+          - label: tp3
+            close_pct: 20
+        4: # Для сигналов с 4 TP
+          - label: tp1
+            close_pct: 40
+          - label: tp2
+            close_pct: 30
+          - label: tp3
+            close_pct: 20
+          - label: tp4
+            close_pct: 10
+        5: # Для сигналов с 5 TP
+          - label: tp1
+            close_pct: 30
+          - label: tp2
+            close_pct: 25
+          - label: tp3
+            close_pct: 20
+          - label: tp4
+            close_pct: 15
+          - label: tp5
+            close_pct: 10
 exchanges:
   binance:
     timeout_seconds: 15
   bybit:
     timeout_seconds: 15
+fees:
+  maker: 0.0002
+  taker: 0.00055
+  break_even_fee_mode: taker
+  break_even_extra_buffer: 0.0
 telegram:
   enabled: false
   chat_id: 1234567890 # Replace with your Telegram chat ID

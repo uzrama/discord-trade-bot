@@ -35,11 +35,13 @@ def mock_config():
                 fixed_leverage=20,
                 free_balance_pct=10.0,
                 default_sl_percent=4.0,
-                tp_distribution=[
-                    TpDistribution(label="TP1", close_pct=33.33),
-                    TpDistribution(label="TP2", close_pct=33.33),
-                    TpDistribution(label="TP3", close_pct=33.34),
-                ],
+                tp_distributions={
+                    3: [
+                        TpDistribution(label="TP1", close_pct=33.33),
+                        TpDistribution(label="TP2", close_pct=33.33),
+                        TpDistribution(label="TP3", close_pct=33.34),
+                    ]
+                },
             )
         ]
     )
@@ -80,7 +82,7 @@ def process_signal_use_case(
 ):
     """Create ProcessSignalUseCase instance with mocked dependencies."""
     return ProcessSignalUseCase(
-        exchange_gateway=mock_exchange_registry,
+        exchange_registry=mock_exchange_registry,
         notification_gateway=mock_notification_gateway,
         state_repository=mock_repository,
         open_position_use_case=mock_open_position_use_case,
@@ -100,6 +102,7 @@ class TestProcessSignalUseCase:
     ):
         """Test processing a valid signal successfully opens a position."""
         dto = ProcessSignalDTO(
+            source_id="test_source_1",
             channel_id="123",  # Match the channel_id in mock_config
             message_id="msg_456",
             text="""
@@ -134,6 +137,7 @@ class TestProcessSignalUseCase:
     async def test_process_invalid_signal(self, process_signal_use_case):
         """Test processing an invalid signal returns failure."""
         dto = ProcessSignalDTO(
+            source_id="test_source_1",
             channel_id="123",
             message_id="msg_456",
             text="Just a random message without trading info",
@@ -149,6 +153,7 @@ class TestProcessSignalUseCase:
     async def test_process_signal_without_symbol(self, process_signal_use_case):
         """Test processing a signal without symbol returns failure."""
         dto = ProcessSignalDTO(
+            source_id="test_source_1",
             channel_id="123",
             message_id="msg_456",
             text="LONG Entry: 50000",
@@ -163,6 +168,7 @@ class TestProcessSignalUseCase:
     async def test_process_signal_without_side(self, process_signal_use_case):
         """Test processing a signal without side returns failure."""
         dto = ProcessSignalDTO(
+            source_id="test_source_1",
             channel_id="123",
             message_id="msg_456",
             text="BTCUSDT Entry: 50000",
@@ -183,6 +189,7 @@ class TestProcessSignalUseCase:
     ):
         """Test that duplicate positions are detected and prevented."""
         dto = ProcessSignalDTO(
+            source_id="test_source_1",
             channel_id="123",
             message_id="msg_456",
             text="""
@@ -211,6 +218,7 @@ class TestProcessSignalUseCase:
     async def test_unknown_channel(self, process_signal_use_case):
         """Test processing signal from unknown channel returns failure."""
         dto = ProcessSignalDTO(
+            source_id="test_source_1",
             channel_id="unknown_channel_999",
             message_id="msg_456",
             text="""
@@ -233,6 +241,7 @@ class TestProcessSignalUseCase:
     ):
         """Test handling of position opening failure."""
         dto = ProcessSignalDTO(
+            source_id="test_source_1",
             channel_id="123",
             message_id="msg_456",
             text="""
@@ -269,6 +278,7 @@ class TestProcessSignalUseCase:
     ):
         """Test processing a SHORT signal."""
         dto = ProcessSignalDTO(
+            source_id="test_source_1",
             channel_id="123",
             message_id="msg_789",
             text="""
@@ -300,6 +310,7 @@ class TestProcessSignalUseCase:
     ):
         """Test that signal updates are not processed as new positions."""
         dto = ProcessSignalDTO(
+            source_id="test_source_1",
             channel_id="123",
             message_id="msg_456",
             text="""
@@ -323,6 +334,7 @@ class TestProcessSignalUseCase:
     ):
         """Test that position state is saved with correct data."""
         dto = ProcessSignalDTO(
+            source_id="test_source_1",
             channel_id="123",
             message_id="msg_456",
             text="""
@@ -344,7 +356,7 @@ class TestProcessSignalUseCase:
         saved_position = mock_repository.save_position.call_args[0][0]
 
         assert saved_position.symbol == "BTCUSDT"
-        assert saved_position.source_id == "123"
+        assert saved_position.source_id == "test_source_1"
         assert saved_position.message_id == "msg_456"
         assert saved_position.exchange == "binance"
         assert saved_position.side == TradeSide.LONG
@@ -365,6 +377,7 @@ class TestProcessSignalUseCase:
     ):
         """Test that trade settings are passed correctly to OpenPositionUseCase."""
         dto = ProcessSignalDTO(
+            source_id="test_source_1",
             channel_id="123",
             message_id="msg_456",
             text="""
@@ -389,4 +402,7 @@ class TestProcessSignalUseCase:
         assert settings.fixed_leverage == 20
         assert settings.free_balance_pct == 10.0
         assert settings.default_sl_percent == 4.0
-        assert len(settings.tp_distribution) == 3
+        # tp_distribution is now a dict[int, list[dict]]
+        assert isinstance(settings.tp_distribution, dict)
+        assert 3 in settings.tp_distribution
+        assert len(settings.tp_distribution[3]) == 3

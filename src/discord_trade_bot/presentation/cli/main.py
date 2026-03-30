@@ -1,6 +1,5 @@
 import asyncio
 import multiprocessing
-import signal
 import subprocess
 import sys
 
@@ -34,6 +33,8 @@ def worker():
             "-m",
             "taskiq",
             "worker",
+            "--workers",
+            "1",
             "discord_trade_bot.infrastructure.taskiq.broker:broker",
             "discord_trade_bot.infrastructure.taskiq.events",
             "discord_trade_bot.infrastructure.taskiq.tasks",

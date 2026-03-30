@@ -8,7 +8,7 @@ class TradeSettingsDTO:
     fixed_leverage: int
     free_balance_pct: float
     default_sl_percent: float | None = None
-    tp_distribution: list[dict[str, Any]] = field(default_factory=list)
+    tp_distribution: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -21,3 +21,4 @@ class OpenPositionResultDTO:
     entry_price: float = 0.0
     final_sl: float | None = None
     exchange_name: str | None = None
+    pending: bool = False  # True if limit order placed, False if market order filled
