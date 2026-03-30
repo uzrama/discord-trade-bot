@@ -47,17 +47,14 @@ htmlcov/
 *.jsonl
 agent_state.db
 
-# Docker
+# Docker (exclude compose files but keep scripts)
 Dockerfile
 docker-compose*.yml
 .dockerignore
-docker/
 
-# Documentation
-README.md
+# Documentation (exclude all except README.md which is needed for build)
 README.Docker.md
 docs/
-*.md
 
 # CI/CD
 .github/

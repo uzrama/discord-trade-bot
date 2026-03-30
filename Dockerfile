@@ -25,16 +25,16 @@ RUN useradd -m -u 1000 -s /bin/bash botuser
 WORKDIR /app
 
 # =============================================================================
-# Stage 2: Builder - Install dependencies
+# Stage 2: Builder - Install dependencies using uv
 # =============================================================================
 FROM base AS builder
 
 # Install uv for fast dependency installation
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.cargo/bin:$PATH"
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Copy dependency files
-COPY pyproject.toml uv.lock ./
+# Copy dependency files, source code, and README (needed for editable install)
+COPY pyproject.toml uv.lock README.md ./
+COPY src/ ./src/
 
 # Install production dependencies
 RUN uv sync --frozen --no-dev
@@ -44,17 +44,14 @@ RUN uv sync --frozen --no-dev
 # =============================================================================
 FROM base AS development
 
-# Copy virtual environment from builder
-COPY --from=builder /app/.venv /app/.venv
-
 # Install uv for development
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.cargo/bin:$PATH"
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Copy dependency files
-COPY pyproject.toml uv.lock ./
+# Copy dependency files, source code, and README (needed for editable install)
+COPY pyproject.toml uv.lock README.md ./
+COPY src/ ./src/
 
-# Install dev dependencies
+# Install all dependencies (including dev)
 RUN uv sync --frozen
 
 # Copy source code (will be overridden by volume mount in dev)
