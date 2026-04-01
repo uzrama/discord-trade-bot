@@ -124,21 +124,8 @@ class ProcessSignalUseCase:
                     position_on_exchange = await exchange.get_position(sig.symbol)
 
                     # Check if position is actually open on exchange
-                    if not exchange.is_position_open(position_on_exchange, existing_pos.side):
-                        # Position closed on exchange but open in DB - sync DB
-                        logger.warning(
-                            f"Position {sig.symbol} {existing_pos.side.value} is closed on exchange but still open in database (ID: {existing_pos.id}). Synchronizing..."
-                        )
-
-                        # Update position status in DB
-                        existing_pos.status = PositionStatus.CLOSED
-                        await self._state_repository.save_position(existing_pos)
-
-                        logger.info(f"Database synchronized: Position {sig.symbol} marked as CLOSED. Proceeding to open new position.")
-
-                        # Continue to open new position (don't return here)
-                    else:
-                        # Position is actually open - block duplicate
+                    if exchange.is_position_open(position_on_exchange, existing_pos.side):
+                        # Position is OPEN on exchange - block duplicate, DO NOT modify DB
                         warning_msg = (
                             f"⚠️ Position for {sig.symbol} is already open on {source_cfg.exchange}\nEntry: {existing_pos.entry_price}\nQty: {existing_pos.qty}\nNew signal ignored."
                         )
@@ -146,6 +133,13 @@ class ProcessSignalUseCase:
                         await self._notification_gateway.send_message(warning_msg)
 
                         return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Duplicate position: {sig.symbol} already open on {source_cfg.exchange}")
+                    else:
+                        # Position is CLOSED on exchange but exists in DB - allow new position, DO NOT modify DB
+                        logger.info(
+                            f"📊 Position {sig.symbol} found in DB (status: {existing_pos.status}, ID: {existing_pos.id}) "
+                            f"but NOT open on exchange. Allowing new position to be opened."
+                        )
+                        # Continue to open new position (don't return here, don't modify DB)
 
                 except Exception as e:
                     logger.error(f"Failed to check position on exchange for {sig.symbol}: {e}. Blocking signal for safety.")
@@ -237,7 +231,6 @@ class ProcessSignalUseCase:
             settings = TradeSettingsDTO(
                 exchange=source_cfg.exchange,
                 fixed_leverage=source_cfg.fixed_leverage,
-                free_balance_pct=source_cfg.free_balance_pct,
                 position_size_pct=source_cfg.position_size_pct,
                 default_sl_percent=source_cfg.default_sl_percent,
                 tp_distribution=tp_distributions_dict,
