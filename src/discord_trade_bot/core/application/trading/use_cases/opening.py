@@ -65,12 +65,20 @@ class OpenPositionUseCase:
             entry_price=sig.entry_price,
             market_price=market_price,
             side=side,
+            stop_loss=sig.stop_loss,
         )
 
         if decision.order_type == OrderType.SKIP:
-            return OpenPositionResultDTO(success=False, reason=f"Entry skipped: {decision.reason}")
+            error_msg = f"Entry skipped: {decision.reason}"
+            logger.warning(f"⚠️ {symbol}: {error_msg}")
 
-        logger.info(f"Entry decision for {symbol}: {decision.order_type} (reason: {decision.reason}, limit_price: {decision.limit_price})")
+            # Send notification if stop loss already hit
+            if "stop_loss_already_hit" in decision.reason:
+                await self._notification_gateway.send_message(f"⚠️ Signal skipped for {symbol}\nReason: Stop loss already hit\n{decision.reason}")
+
+            return OpenPositionResultDTO(success=False, reason=error_msg)
+
+        logger.debug(f"Entry decision for {symbol}: {decision.order_type} (limit price: {decision.limit_price})")
 
         # 5. Compute qty and notional using market_price (same as bot_fixed)
         qty, notional_value = await self._compute_qty(exchange, symbol, market_price, leverage, settings)
@@ -84,12 +92,10 @@ class OpenPositionUseCase:
             error_msg = (
                 f"Cannot open position for {symbol}: notional value too low. "
                 f"Calculated: {notional_value:.4f} USDT < minimum {min_notional} USDT. "
-                f"Increase free_balance_pct in config (current: {settings.free_balance_pct}%) or skip this signal."
+                f"Increase position_size_pct in config (current: {settings.position_size_pct}%) or skip this signal."
             )
             logger.warning(f"⚠️ {error_msg}")
             return OpenPositionResultDTO(success=False, reason=error_msg)
-
-        logger.info(f"✅ Notional value check passed for {symbol}: {notional_value:.2f} USDT (min: {min_notional} USDT)")
 
         # 6.5. Final check: ensure no position exists on exchange before placing order
         # This is a safety check to prevent race conditions and manual position conflicts
@@ -101,7 +107,6 @@ class OpenPositionUseCase:
                 await self._notification_gateway.send_message(f"⚠️ {error_msg}")
                 return OpenPositionResultDTO(success=False, reason=error_msg)
 
-            logger.info(f"✅ Position check passed for {symbol}: no existing position found")
         except Exception as e:
             logger.warning(f"Failed to check existing position for {symbol}: {e}. Proceeding with caution.")
             # Continue anyway - exchange will reject if there's a conflict
@@ -378,36 +383,13 @@ class OpenPositionUseCase:
             qty_precision = symbol_info.get("qty_precision", 3)
             min_qty = symbol_info.get("min_qty", 0.001)
 
-            balance = await exchange.get_balance()
-
-            # Two-step calculation: free_balance_pct → position_size_pct
-            # Step 1: Calculate free_balance from available balance
-            free_balance_pct = settings.free_balance_pct
-            free_balance = balance * (free_balance_pct / 100.0)
-
-            # Step 2: Apply position_size_pct to free_balance (REQUIRED)
-            if settings.position_size_pct is None:
-                error_msg = f"position_size_pct not specified in config for {symbol}. Cannot calculate position size."
-                logger.error(error_msg)
-                return 0.0, 0.0
+            available_balance = await exchange.get_balance()
 
             position_size_pct = settings.position_size_pct
-            margin = free_balance * (position_size_pct / 100.0)
+
+            margin = available_balance * (position_size_pct / 100.0)
             notional = margin * leverage
             qty = notional / price
-
-            logger.info(
-                f"[Position Sizing] {symbol}: "
-                f"balance={balance:.2f} USDT, "
-                f"free_balance_pct={free_balance_pct}%, "
-                f"free_balance={free_balance:.2f} USDT, "
-                f"position_size_pct={position_size_pct}%, "
-                f"margin={margin:.2f} USDT, "
-                f"leverage={leverage}x, "
-                f"notional={notional:.2f} USDT, "
-                f"price={price:.8f}, "
-                f"qty_raw={qty:.8f}"
-            )
 
             qty = round(qty, qty_precision)
 
@@ -415,7 +397,7 @@ class OpenPositionUseCase:
                 logger.warning(f"Calculated qty {qty} is less than min_qty {min_qty}, using min_qty")
                 qty = min_qty
 
-            logger.info(f"[Position Sizing] {symbol}: final qty={qty:.8f}, notional={notional:.2f} USDT (after rounding and min_qty check)")
+            logger.info(f"[Position Sizing] {symbol}: qty={qty:.8f}, notional={notional:.2f} USDT, margin={margin}, leverage={leverage}")
 
             return qty, notional
         except Exception as e:

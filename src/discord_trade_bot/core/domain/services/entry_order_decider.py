@@ -39,12 +39,14 @@ def decide_entry_order(
     entry_price: float | None,
     market_price: float,
     side: TradeSide,
+    stop_loss: float | None = None,
 ) -> EntryOrderDecision:
     """Decide whether to use market or limit order for entry.
 
     Logic:
-    - LONG: if market_price <= entry_price → market, else → limit at entry_price
-    - SHORT: if market_price >= entry_price → market, else → limit at entry_price
+    - LONG: if market_price <= entry_price → check SL, then market or skip
+    - SHORT: if market_price >= entry_price → check SL, then market or skip
+    - If stop_loss exists and already hit → skip entry
     - CMP with entry_price: applies same logic as above
     - CMP without entry_price: always market
     - No entry_mode or invalid: skip
@@ -54,6 +56,7 @@ def decide_entry_order(
         entry_price: Entry price from signal (can be None for CMP)
         market_price: Current market price
         side: Trade side (LONG or SHORT)
+        stop_loss: Stop loss price from signal (optional)
 
     Returns:
         EntryOrderDecision with order type, limit price, and reason
@@ -91,6 +94,13 @@ def decide_entry_order(
         if entry_price is not None and entry_price > 0:
             if side == TradeSide.LONG:
                 if market_price <= entry_price:
+                    # Check if stop loss already hit
+                    if stop_loss is not None and market_price <= stop_loss:
+                        return EntryOrderDecision(
+                            order_type=OrderType.SKIP,
+                            limit_price=None,
+                            reason=f"stop_loss_already_hit (Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Market: {market_price:.2f})",
+                        )
                     return EntryOrderDecision(
                         order_type=OrderType.MARKET,
                         limit_price=None,
@@ -103,6 +113,13 @@ def decide_entry_order(
                 )
             else:  # SHORT
                 if market_price >= entry_price:
+                    # Check if stop loss already hit
+                    if stop_loss is not None and market_price >= stop_loss:
+                        return EntryOrderDecision(
+                            order_type=OrderType.SKIP,
+                            limit_price=None,
+                            reason=f"stop_loss_already_hit (Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Market: {market_price:.2f})",
+                        )
                     return EntryOrderDecision(
                         order_type=OrderType.MARKET,
                         limit_price=None,
@@ -132,6 +149,13 @@ def decide_entry_order(
 
         if side == TradeSide.LONG:
             if market_price <= entry_price:
+                # Check if stop loss already hit
+                if stop_loss is not None and market_price <= stop_loss:
+                    return EntryOrderDecision(
+                        order_type=OrderType.SKIP,
+                        limit_price=None,
+                        reason=f"stop_loss_already_hit (Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Market: {market_price:.2f})",
+                    )
                 return EntryOrderDecision(
                     order_type=OrderType.MARKET,
                     limit_price=None,
@@ -144,6 +168,13 @@ def decide_entry_order(
             )
         else:  # SHORT
             if market_price >= entry_price:
+                # Check if stop loss already hit
+                if stop_loss is not None and market_price >= stop_loss:
+                    return EntryOrderDecision(
+                        order_type=OrderType.SKIP,
+                        limit_price=None,
+                        reason=f"stop_loss_already_hit (Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Market: {market_price:.2f})",
+                    )
                 return EntryOrderDecision(
                     order_type=OrderType.MARKET,
                     limit_price=None,
