@@ -72,35 +72,16 @@ class OpenPositionUseCase:
 
         logger.info(f"Entry decision for {symbol}: {decision.order_type} (reason: {decision.reason}, limit_price: {decision.limit_price})")
 
-        # 5. Compute qty using market_price (same as bot_fixed)
+        # 5. Compute qty and notional using market_price (same as bot_fixed)
         # IMPORTANT: Always use market_price for qty calculation, regardless of order type.
         # This matches bot_fixed behavior where qty = notional / market_price.
         # The configured percent is interpreted as the margin portion of the currently
         # available balance. Final position notional is that margin multiplied by leverage.
-        qty = await self._compute_qty(exchange, symbol, market_price, leverage, settings)
+        qty, notional_value = await self._compute_qty(exchange, symbol, market_price, leverage, settings)
         if qty <= 0:
             return OpenPositionResultDTO(success=False, reason="Invalid qty (0 or negative). Check balance and settings.")
 
         # 6. Validate minimum notional value (Bybit requires min 5 USDT)
-        # Calculate notional directly from balance and leverage (correct for all symbols including base units)
-        try:
-            balance = await exchange.get_balance()
-            size_pct = settings.free_balance_pct
-            margin = balance * (size_pct / 100.0)
-            notional_value = margin * leverage
-
-            logger.info(
-                f"[Notional Check] {symbol}: "
-                f"balance={balance:.2f} USDT, "
-                f"free_balance_pct={size_pct}%, "
-                f"margin={margin:.2f} USDT, "
-                f"leverage={leverage}x, "
-                f"notional_value={notional_value:.2f} USDT"
-            )
-        except Exception as e:
-            logger.error(f"Failed to calculate notional value: {e}")
-            notional_value = 0.0
-
         min_notional = 5.0  # USDT minimum for Bybit
 
         if notional_value < min_notional:
@@ -114,7 +95,7 @@ class OpenPositionUseCase:
 
         logger.info(f"✅ Notional value check passed for {symbol}: {notional_value:.2f} USDT (min: {min_notional} USDT)")
 
-        # 6. Branch based on order type
+        # 7. Branch based on order type
         if decision.order_type == OrderType.MARKET:
             return await self._execute_market_entry(
                 exchange=exchange,
@@ -375,7 +356,12 @@ class OpenPositionUseCase:
     async def _resolve_leverage(self, settings: TradeSettingsDTO) -> int:
         return settings.fixed_leverage
 
-    async def _compute_qty(self, exchange: ExchangeGatewayProtocol, symbol: str, price: float, leverage: int, settings: TradeSettingsDTO) -> float:
+    async def _compute_qty(self, exchange: ExchangeGatewayProtocol, symbol: str, price: float, leverage: int, settings: TradeSettingsDTO) -> tuple[float, float]:
+        """Calculate position quantity and notional value.
+
+        Returns:
+            tuple[float, float]: (qty, notional_value)
+        """
         try:
             symbol_info = await exchange.get_symbol_info(symbol)
             qty_precision = symbol_info.get("qty_precision", 3)
@@ -404,12 +390,12 @@ class OpenPositionUseCase:
                 logger.warning(f"Calculated qty {qty} is less than min_qty {min_qty}, using min_qty")
                 qty = min_qty
 
-            logger.info(f"[Position Sizing] {symbol}: final qty={qty:.8f} (after rounding and min_qty check)")
+            logger.info(f"[Position Sizing] {symbol}: final qty={qty:.8f}, notional={notional:.2f} USDT (after rounding and min_qty check)")
 
-            return qty
+            return qty, notional
         except Exception as e:
             logger.error(f"Failed to compute qty: balance query failed or calculation error. Price={price}, Leverage={leverage}, Error: {e}")
-            return 0.0
+            return 0.0, 0.0
 
     def _calculate_stop_loss(self, signal_sl: float | None, market_price: float, side: TradeSide, default_sl_pct: float | None) -> float | None:
         if signal_sl is not None:
