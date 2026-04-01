@@ -104,7 +104,7 @@ class ProcessSignalUseCase:
                 logger.warning(f"Unknown channel {dto.channel_id}")
                 return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason="Unknown channel")
 
-            # Check for duplicate position on the same exchange
+            # Check for duplicate position on the same exchange (in local database)
             existing_positions = await self._state_repository.get_open_positions_by_symbol_and_exchange(symbol=sig.symbol, exchange=source_cfg.exchange)
 
             if existing_positions:
@@ -124,6 +124,68 @@ class ProcessSignalUseCase:
                 await self._notification_gateway.send_message(warning_msg)
 
                 return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Duplicate position: {sig.symbol} already open on {source_cfg.exchange}")
+
+            # Check for position on exchange (not just in database)
+            # This catches manually opened positions or database sync issues
+            exchange = self._exchange_registry.get_exchange(source_cfg.exchange)
+
+            try:
+                position_on_exchange = await exchange.get_position(sig.symbol)
+
+                if exchange.is_position_open(position_on_exchange, sig.side):
+                    # Position exists on exchange but not in DB
+                    warning_msg = (
+                        f"⚠️ Position for {sig.symbol} {sig.side.value} already exists on {source_cfg.exchange} "
+                        f"but not found in local database.\n"
+                        f"This may indicate:\n"
+                        f"• Manual position opened via exchange UI\n"
+                        f"• Database synchronization issue\n"
+                        f"New signal ignored."
+                    )
+                    logger.warning(f"Position exists on exchange but not in DB: {sig.symbol} {sig.side.value}")
+                    await self._notification_gateway.send_message(warning_msg)
+
+                    return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Position already exists on exchange: {sig.symbol}")
+
+                # Check for opposite side position (hedging check)
+                from discord_trade_bot.core.domain.value_objects.trading import TradeSide
+
+                opposite_side = TradeSide.SHORT if sig.side == TradeSide.LONG else TradeSide.LONG
+                if exchange.is_position_open(position_on_exchange, opposite_side):
+                    warning_msg = (
+                        f"⚠️ Opposite position ({opposite_side.value}) exists for {sig.symbol} on {source_cfg.exchange}\n"
+                        f"Cannot open {sig.side.value} position. Close the existing position first.\n"
+                        f"New signal ignored."
+                    )
+                    logger.warning(f"Opposite position exists: {sig.symbol} has {opposite_side.value}, signal wants {sig.side.value}")
+                    await self._notification_gateway.send_message(warning_msg)
+
+                    return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Opposite position exists: {sig.symbol}")
+
+            except Exception as e:
+                logger.warning(f"Failed to check position on exchange for {sig.symbol}: {e}. Proceeding with caution.")
+                # Continue anyway - will be caught by opening.py final check
+
+            # Check for pending entry orders
+            try:
+                open_orders = await exchange.list_open_orders(sig.symbol)
+                entry_orders = [
+                    order
+                    for order in open_orders
+                    if not order.get("reduceOnly", False)  # Not a closing order
+                ]
+
+                if entry_orders:
+                    warning_msg = (
+                        f"⚠️ Pending entry order(s) found for {sig.symbol} on {source_cfg.exchange}\nCount: {len(entry_orders)}\nNew signal ignored to avoid duplicate entries."
+                    )
+                    logger.warning(f"Pending entry orders found for {sig.symbol}: {len(entry_orders)}")
+                    await self._notification_gateway.send_message(warning_msg)
+
+                    return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Pending entry orders exist: {sig.symbol}")
+            except Exception as e:
+                logger.warning(f"Failed to check open orders for {sig.symbol}: {e}. Proceeding with caution.")
+                # Continue anyway - will be caught by opening.py final check
 
             logger.info(f"Opening position: {sig.symbol} {sig.side} [Leverage: {sig.leverage}] [Entry price: {sig.entry_price}]")
 

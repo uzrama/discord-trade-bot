@@ -6,7 +6,7 @@ discord:
       enabled: true
       channel_id: 1483388521925578785 # Replace with your Discord channel ID
       exchange: bybit
-      free_balance_pct: 1
+      free_balance_pct: 40
       fixed_leverage: 5
       default_sl_percent: 0.5
       position_size_pct: 5

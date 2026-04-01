@@ -73,10 +73,6 @@ class OpenPositionUseCase:
         logger.info(f"Entry decision for {symbol}: {decision.order_type} (reason: {decision.reason}, limit_price: {decision.limit_price})")
 
         # 5. Compute qty and notional using market_price (same as bot_fixed)
-        # IMPORTANT: Always use market_price for qty calculation, regardless of order type.
-        # This matches bot_fixed behavior where qty = notional / market_price.
-        # The configured percent is interpreted as the margin portion of the currently
-        # available balance. Final position notional is that margin multiplied by leverage.
         qty, notional_value = await self._compute_qty(exchange, symbol, market_price, leverage, settings)
         if qty <= 0:
             return OpenPositionResultDTO(success=False, reason="Invalid qty (0 or negative). Check balance and settings.")
@@ -94,6 +90,21 @@ class OpenPositionUseCase:
             return OpenPositionResultDTO(success=False, reason=error_msg)
 
         logger.info(f"✅ Notional value check passed for {symbol}: {notional_value:.2f} USDT (min: {min_notional} USDT)")
+
+        # 6.5. Final check: ensure no position exists on exchange before placing order
+        # This is a safety check to prevent race conditions and manual position conflicts
+        try:
+            position = await exchange.get_position(symbol)
+            if exchange.is_position_open(position, side):
+                error_msg = f"Cannot open position for {symbol}: position already exists on exchange. This may indicate a race condition or manual position opening."
+                logger.warning(f"⚠️ {error_msg}")
+                await self._notification_gateway.send_message(f"⚠️ {error_msg}")
+                return OpenPositionResultDTO(success=False, reason=error_msg)
+
+            logger.info(f"✅ Position check passed for {symbol}: no existing position found")
+        except Exception as e:
+            logger.warning(f"Failed to check existing position for {symbol}: {e}. Proceeding with caution.")
+            # Continue anyway - exchange will reject if there's a conflict
 
         # 7. Branch based on order type
         if decision.order_type == OrderType.MARKET:

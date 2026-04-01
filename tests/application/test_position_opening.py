@@ -32,9 +32,9 @@ def mock_exchange_registry():
         }
     )
     exchange.place_market_order = AsyncMock(return_value={"orderId": "entry_123", "status": "FILLED"})
-    exchange.get_position = AsyncMock(return_value={"positionAmt": "0.001", "entryPrice": "50000.0"})
+    exchange.get_position = AsyncMock(return_value={"positionAmt": "0", "entryPrice": "0"})  # No position initially
     exchange.wait_for_position_ready = AsyncMock(return_value=True)
-    exchange.is_position_open = Mock(return_value=True)
+    exchange.is_position_open = Mock(return_value=False)  # No position initially
     exchange.place_sl_tp_orders = AsyncMock(
         return_value={
             "stop_loss": {"orderId": "sl_123"},

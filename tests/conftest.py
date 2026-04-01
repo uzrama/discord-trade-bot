@@ -141,7 +141,9 @@ def mock_exchange():
         }
     )
     exchange.cancel_order = AsyncMock(return_value={"orderId": "12345", "status": "CANCELED"})
-    exchange.get_position = AsyncMock(return_value={"positionAmt": "0.1", "entryPrice": "50000"})
+    exchange.get_position = AsyncMock(return_value={"positionAmt": "0", "entryPrice": "0"})  # No position by default
+    exchange.is_position_open = Mock(return_value=False)  # No position by default
+    exchange.list_open_orders = AsyncMock(return_value=[])  # No open orders by default
     exchange.cancel_all_orders = AsyncMock(return_value=[])
     exchange.close = AsyncMock()
     return exchange
