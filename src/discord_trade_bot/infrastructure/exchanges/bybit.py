@@ -156,18 +156,9 @@ class BybitFuturesAdapter(BaseExchangeAdapter):
         if not list_data:
             return 0.0
 
-        account_data = list_data[0]
-        total_equity = float(account_data.get("totalEquity", 0.0))
-        total_available = float(account_data.get("totalAvailableBalance", 0.0))
-
-        for coin_data in account_data.get("coin", []):
+        for coin_data in list_data[0].get("coin", []):
             if coin_data.get("coin") == "USDT":
-                available = float(coin_data.get("availableToWithdraw") or coin_data.get("walletBalance") or 0.0)
-
-                # Log detailed balance info for debugging cross margin issues
-                logger.debug(f"[Bybit Balance] Available: {available:.2f} USDT, Total Equity: {total_equity:.2f} USDT, Total Available: {total_available:.2f} USDT")
-
-                return available
+                return float(coin_data.get("availableToWithdraw") or coin_data.get("walletBalance") or 0.0)
         return 0.0
 
     @override

@@ -83,20 +83,15 @@ class OpenPositionUseCase:
 
         # 6. Validate minimum notional value (Bybit requires min 5 USDT)
         # Calculate notional directly from balance and leverage (correct for all symbols including base units)
-        # Apply safety margin to account for cross margin mode
         try:
             balance = await exchange.get_balance()
             size_pct = settings.free_balance_pct
-            safety_factor = 0.70  # Use max 70% of available balance for cross margin safety
-            effective_balance = balance * safety_factor
-            margin = effective_balance * (size_pct / 100.0)
+            margin = balance * (size_pct / 100.0)
             notional_value = margin * leverage
 
             logger.info(
                 f"[Notional Check] {symbol}: "
                 f"balance={balance:.2f} USDT, "
-                f"safety_factor={safety_factor:.0%}, "
-                f"effective_balance={effective_balance:.2f} USDT, "
                 f"free_balance_pct={size_pct}%, "
                 f"margin={margin:.2f} USDT, "
                 f"leverage={leverage}x, "
@@ -388,24 +383,13 @@ class OpenPositionUseCase:
 
             balance = await exchange.get_balance()
             size_pct = settings.free_balance_pct
-
-            # Apply safety margin for cross margin mode (use max 70% of available balance)
-            # This accounts for:
-            # - Existing open positions using margin
-            # - Fees and liquidation buffers
-            # - Bybit's internal margin requirements
-            safety_factor = 0.70
-            effective_balance = balance * safety_factor
-
-            margin = effective_balance * (size_pct / 100.0)
+            margin = balance * (size_pct / 100.0)
             notional = margin * leverage
             qty = notional / price
 
             logger.info(
                 f"[Position Sizing] {symbol}: "
                 f"balance={balance:.2f} USDT, "
-                f"safety_factor={safety_factor:.0%}, "
-                f"effective_balance={effective_balance:.2f} USDT, "
                 f"free_balance_pct={size_pct}%, "
                 f"margin={margin:.2f} USDT, "
                 f"leverage={leverage}x, "
