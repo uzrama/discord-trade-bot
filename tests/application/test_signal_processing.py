@@ -186,6 +186,7 @@ class TestProcessSignalUseCase:
         process_signal_use_case,
         mock_repository,
         mock_notification_gateway,
+        mock_exchange_registry,
         sample_position,
     ):
         """Test that duplicate positions are detected and prevented."""
@@ -201,8 +202,12 @@ class TestProcessSignalUseCase:
             """,
         )
 
-        # Return existing position
+        # Return existing position in DB
         mock_repository.get_open_positions_by_symbol_and_exchange.return_value = [sample_position]
+
+        # Mock exchange to return that position is actually open
+        exchange = mock_exchange_registry.get_exchange("binance")
+        exchange.is_position_open.return_value = True  # Position is actually open on exchange
 
         result = await process_signal_use_case.execute(dto)
 

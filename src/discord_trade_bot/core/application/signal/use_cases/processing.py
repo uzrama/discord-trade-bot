@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime
 from typing import Any, final
 
 from discord_trade_bot.core.application.common.interfaces.notification import (
@@ -21,7 +22,7 @@ from discord_trade_bot.core.application.trading.interfaces import (
 from discord_trade_bot.core.application.trading.use_cases import OpenPositionUseCase
 from discord_trade_bot.core.domain.entities.position import ActivePositionEntity
 from discord_trade_bot.core.domain.services.parser import SignalParserService
-from discord_trade_bot.core.domain.value_objects.trading import PositionStatus
+from discord_trade_bot.core.domain.value_objects.trading import PositionStatus, TradeSide
 from discord_trade_bot.main.config.app import AppConfig
 
 logger = logging.getLogger(__name__)
@@ -115,15 +116,41 @@ class ProcessSignalUseCase:
                         logger.info(f"Detected edited message for {sig.symbol} (message_id: {dto.message_id}), processing as update")
                         return await self._handle_signal_update_use_case.execute(sig, dto)
 
-                # If we reach here, it's a duplicate (different message_id)
+                # Position found in DB - check if it's actually open on exchange
                 existing_pos = existing_positions[0]
-                warning_msg = (
-                    f"⚠️ Position for {sig.symbol} is already open on {source_cfg.exchange}\nEntry: {existing_pos.entry_price}\nQty: {existing_pos.qty}\nNew signal ignored."
-                )
-                logger.warning(f"Duplicate position detected: {sig.symbol} on {source_cfg.exchange}")
-                await self._notification_gateway.send_message(warning_msg)
+                exchange = self._exchange_registry.get_exchange(source_cfg.exchange)
 
-                return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Duplicate position: {sig.symbol} already open on {source_cfg.exchange}")
+                try:
+                    position_on_exchange = await exchange.get_position(sig.symbol)
+
+                    # Check if position is actually open on exchange
+                    if not exchange.is_position_open(position_on_exchange, existing_pos.side):
+                        # Position closed on exchange but open in DB - sync DB
+                        logger.warning(
+                            f"Position {sig.symbol} {existing_pos.side.value} is closed on exchange but still open in database (ID: {existing_pos.id}). Synchronizing..."
+                        )
+
+                        # Update position status in DB
+                        existing_pos.status = PositionStatus.CLOSED
+                        await self._state_repository.save_position(existing_pos)
+
+                        logger.info(f"Database synchronized: Position {sig.symbol} marked as CLOSED. Proceeding to open new position.")
+
+                        # Continue to open new position (don't return here)
+                    else:
+                        # Position is actually open - block duplicate
+                        warning_msg = (
+                            f"⚠️ Position for {sig.symbol} is already open on {source_cfg.exchange}\nEntry: {existing_pos.entry_price}\nQty: {existing_pos.qty}\nNew signal ignored."
+                        )
+                        logger.warning(f"Duplicate position detected: {sig.symbol} on {source_cfg.exchange}")
+                        await self._notification_gateway.send_message(warning_msg)
+
+                        return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Duplicate position: {sig.symbol} already open on {source_cfg.exchange}")
+
+                except Exception as e:
+                    logger.error(f"Failed to check position on exchange for {sig.symbol}: {e}. Blocking signal for safety.")
+                    # If check fails, block signal (safe default)
+                    return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Failed to verify position status on exchange: {sig.symbol}")
 
             # Check for position on exchange (not just in database)
             # This catches manually opened positions or database sync issues
@@ -148,19 +175,25 @@ class ProcessSignalUseCase:
                     return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Position already exists on exchange: {sig.symbol}")
 
                 # Check for opposite side position (hedging check)
-                from discord_trade_bot.core.domain.value_objects.trading import TradeSide
-
                 opposite_side = TradeSide.SHORT if sig.side == TradeSide.LONG else TradeSide.LONG
                 if exchange.is_position_open(position_on_exchange, opposite_side):
-                    warning_msg = (
-                        f"⚠️ Opposite position ({opposite_side.value}) exists for {sig.symbol} on {source_cfg.exchange}\n"
-                        f"Cannot open {sig.side.value} position. Close the existing position first.\n"
-                        f"New signal ignored."
-                    )
-                    logger.warning(f"Opposite position exists: {sig.symbol} has {opposite_side.value}, signal wants {sig.side.value}")
-                    await self._notification_gateway.send_message(warning_msg)
+                    # Opposite position exists - sync DB and allow new position
+                    logger.warning(f"Opposite position ({opposite_side.value}) exists for {sig.symbol} on {source_cfg.exchange}. Checking if it's tracked in database...")
 
-                    return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Opposite position exists: {sig.symbol}")
+                    # Check if opposite position is in DB
+                    opposite_positions = await self._state_repository.get_open_positions_by_symbol_and_exchange(symbol=sig.symbol, exchange=source_cfg.exchange)
+
+                    # Sync any opposite positions in DB
+                    for opp_pos in opposite_positions:
+                        if opp_pos.side == opposite_side:
+                            logger.warning(f"Opposite position {sig.symbol} {opposite_side.value} found in DB but closed on exchange. Synchronizing database...")
+                            opp_pos.status = PositionStatus.CLOSED
+                            await self._state_repository.save_position(opp_pos)
+                            logger.info(f"Database synchronized: Opposite position {sig.symbol} {opposite_side.value} marked as CLOSED.")
+
+                    # Allow opening new position in opposite direction
+                    logger.info(f"Proceeding to open {sig.side.value} position for {sig.symbol}")
+                    # Continue to open new position (don't return here)
 
             except Exception as e:
                 logger.warning(f"Failed to check position on exchange for {sig.symbol}: {e}. Proceeding with caution.")
