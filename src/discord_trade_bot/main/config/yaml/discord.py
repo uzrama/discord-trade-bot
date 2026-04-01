@@ -13,7 +13,7 @@ class Source(BaseModel):
     exchange: str = "binance"
     fixed_leverage: int
     free_balance_pct: float = 10.0
-    position_size_pct: float | None = None  # Required for position sizing
+    position_size_pct: float
     stale_signal_seconds: int = 120
     max_price_deviation_pct: float = 2.0
     default_sl_percent: float
@@ -27,12 +27,6 @@ class Source(BaseModel):
     @model_validator(mode="after")
     def validate_position_sizing(self):
         """Validate that required position sizing parameters are provided."""
-        if self.position_size_pct is None:
-            raise ValueError(f"position_size_pct is required for source '{self.source_id}'. Please specify position_size_pct in your config.yaml")
-
-        # Validate ranges
-        if self.free_balance_pct < 1 or self.free_balance_pct > 100:
-            raise ValueError(f"free_balance_pct must be between 1 and 100 for source '{self.source_id}'")
 
         if self.position_size_pct < 1 or self.position_size_pct > 100:
             raise ValueError(f"position_size_pct must be between 1 and 100 for source '{self.source_id}'")

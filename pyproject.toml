@@ -58,6 +58,7 @@ reportMissingTypeStubs = false
 reportUnreachable = false
 reportUntypedFunctionDecorator = false
 reportUntypedBaseClass = false
+reportImplicitStringConcatenation = "none"
 ignore = [
     "tests",
     "migrations",
