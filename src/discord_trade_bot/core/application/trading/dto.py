@@ -7,6 +7,7 @@ class TradeSettingsDTO:
     exchange: str
     fixed_leverage: int
     free_balance_pct: float
+    position_size_pct: float | None = None
     default_sl_percent: float | None = None
     tp_distribution: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
 

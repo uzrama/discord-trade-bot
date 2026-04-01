@@ -34,6 +34,7 @@ def mock_config():
                 exchange="binance",
                 fixed_leverage=20,
                 free_balance_pct=10.0,
+                position_size_pct=5.0,
                 default_sl_percent=4.0,
                 tp_distributions={
                     3: [

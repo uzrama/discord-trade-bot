@@ -205,6 +205,7 @@ class ProcessSignalUseCase:
                 exchange=source_cfg.exchange,
                 fixed_leverage=source_cfg.fixed_leverage,
                 free_balance_pct=source_cfg.free_balance_pct,
+                position_size_pct=source_cfg.position_size_pct,
                 default_sl_percent=source_cfg.default_sl_percent,
                 tp_distribution=tp_distributions_dict,
             )

@@ -67,6 +67,7 @@ def trade_settings():
         exchange="binance",
         fixed_leverage=20,
         free_balance_pct=10.0,
+        position_size_pct=5.0,
         default_sl_percent=4.0,
         tp_distribution=[
             {"label": "TP1", "close_pct": 33.33},
@@ -276,11 +277,12 @@ class TestOpenPositionUseCase:
         result = await open_position_use_case.execute(long_signal, trade_settings)
 
         assert result.success is True
-        # Balance: 1000, free_balance_pct: 10%, leverage: 20
-        # Margin: 1000 * 0.1 = 100
-        # Notional: 100 * 20 = 2000
-        # Qty: 2000 / 50000 = 0.04
-        assert result.qty == 0.04
+        # Two-step calculation:
+        # Step 1: free_balance = balance * free_balance_pct = 1000 * 0.1 = 100 USDT
+        # Step 2: margin = free_balance * position_size_pct = 100 * 0.05 = 5 USDT
+        # Notional: margin * leverage = 5 * 20 = 100 USDT
+        # Qty: notional / price = 100 / 50000 = 0.002
+        assert result.qty == 0.002
 
     @pytest.mark.asyncio
     @patch("asyncio.sleep", new_callable=AsyncMock)
@@ -294,7 +296,7 @@ class TestOpenPositionUseCase:
     ):
         """Test that minimum quantity is enforced."""
         exchange = mock_exchange_registry.get_exchange("binance")
-        exchange.get_balance.return_value = 10.0  # Very small balance
+        exchange.get_balance.return_value = 1000.0  # Increased balance to meet min notional
         exchange.get_symbol_info.return_value = {
             "qty_precision": 3,
             "price_precision": 2,

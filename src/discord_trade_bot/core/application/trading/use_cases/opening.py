@@ -379,15 +379,29 @@ class OpenPositionUseCase:
             min_qty = symbol_info.get("min_qty", 0.001)
 
             balance = await exchange.get_balance()
-            size_pct = settings.free_balance_pct
-            margin = balance * (size_pct / 100.0)
+
+            # Two-step calculation: free_balance_pct → position_size_pct
+            # Step 1: Calculate free_balance from available balance
+            free_balance_pct = settings.free_balance_pct
+            free_balance = balance * (free_balance_pct / 100.0)
+
+            # Step 2: Apply position_size_pct to free_balance (REQUIRED)
+            if settings.position_size_pct is None:
+                error_msg = f"position_size_pct not specified in config for {symbol}. Cannot calculate position size."
+                logger.error(error_msg)
+                return 0.0, 0.0
+
+            position_size_pct = settings.position_size_pct
+            margin = free_balance * (position_size_pct / 100.0)
             notional = margin * leverage
             qty = notional / price
 
             logger.info(
                 f"[Position Sizing] {symbol}: "
                 f"balance={balance:.2f} USDT, "
-                f"free_balance_pct={size_pct}%, "
+                f"free_balance_pct={free_balance_pct}%, "
+                f"free_balance={free_balance:.2f} USDT, "
+                f"position_size_pct={position_size_pct}%, "
                 f"margin={margin:.2f} USDT, "
                 f"leverage={leverage}x, "
                 f"notional={notional:.2f} USDT, "
