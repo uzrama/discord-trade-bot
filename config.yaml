@@ -47,6 +47,7 @@ exchanges:
   binance:
     timeout_seconds: 15
   bybit:
+    demo: false
     timeout_seconds: 15
 fees:
   maker: 0.0002
