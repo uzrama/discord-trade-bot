@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Coroutine
-from typing import Any, cast, final, override
+from typing import Any, ParamSpec, TypeVar, cast, final, override
 
 from pybit.unified_trading import HTTP, WebSocket
 
@@ -10,6 +10,9 @@ from discord_trade_bot.core.domain.value_objects.trading import TradeSide
 from discord_trade_bot.infrastructure.exchanges.base import BaseExchangeAdapter
 
 logger = logging.getLogger(__name__)
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 @final
@@ -36,9 +39,8 @@ class BybitFuturesAdapter(BaseExchangeAdapter):
         self._stop_event.set()
 
     # Helper method to run synchronous pybit functions without blocking Event Loop
-    async def _run_in_thread(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
+    async def _run_in_thread(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> Any:
+        return await asyncio.to_thread(func, *args, **kwargs)
 
     @staticmethod
     def _floor_to_step(value: float, step: float) -> float:
@@ -157,9 +159,8 @@ class BybitFuturesAdapter(BaseExchangeAdapter):
         if not list_data:
             return 0.0
 
-        for coin_data in list_data[0].get("coin", []):
-            if coin_data.get("coin") == "USDT":
-                return float(coin_data.get("availableToWithdraw") or coin_data.get("walletBalance") or 0.0)
+        if balance := list_data[0].get("totalAvailableBalance"):
+            return float(balance or 0.0)
         return 0.0
 
     @override
