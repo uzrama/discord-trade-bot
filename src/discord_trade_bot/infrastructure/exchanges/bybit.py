@@ -284,7 +284,6 @@ class BybitFuturesAdapter(BaseExchangeAdapter):
 
                 # Log success with details
                 if current_price:
-                    abs((stop_loss - current_price) / current_price) * 100
                     logger.info(f"✅ Bybit SL order placed successfully for {symbol}")
                 else:
                     logger.info(f"✅ Bybit SL order placed for {symbol}: Order ID {res.get('orderId', 'N/A')}, SL=${stop_loss:,.2f}")
@@ -294,13 +293,26 @@ class BybitFuturesAdapter(BaseExchangeAdapter):
             # Calculate TP quantities using configured distribution
             tp_quantities = calculate_tp_quantities(total_qty=qty, num_tps=len(take_profits), tp_distributions=tp_distribution)
 
-            for i, (tp, tp_qty) in enumerate(zip(take_profits, tp_quantities)):
+            num_tps = len(take_profits)
+            for idx in range(num_tps):
+                tp = take_profits[idx]
+                tp_qty = tp_quantities[idx]
+
                 close_side = "Sell" if side == TradeSide.LONG else "Buy"
                 trigger_direction = 1 if side == TradeSide.LONG else 2
 
                 try:
-                    # Use smart formatting based on symbol's qtyStep
-                    qty_str = await self._format_quantity_for_symbol(symbol, tp_qty, reduce_only=True)
+                    # For the last TP: use qty="0" to close entire remaining position
+                    # This avoids rounding issues where sum of TPs < total qty
+                    is_last_tp = idx == num_tps - 1
+
+                    if is_last_tp:
+                        qty_str = "0"  # Special Bybit value: close entire position
+                        logger.info(f"📊 TP{idx + 1} (last) will close entire remaining position (qty=0)")
+                    else:
+                        # Use smart formatting based on symbol's qtyStep
+                        qty_str = await self._format_quantity_for_symbol(symbol, tp_qty, reduce_only=True)
+
                     price_str = await self._format_price_for_symbol(symbol, tp)
 
                     res = await self._run_in_thread(
@@ -318,9 +330,9 @@ class BybitFuturesAdapter(BaseExchangeAdapter):
                         positionIdx=0,
                     )
                     results["take_profits"].append({"orderId": res["result"]["orderId"]})
-                    logger.info(f"✅ TP{i + 1} placed at {price_str} with qty {qty_str} for {symbol}")
+                    logger.info(f"✅ TP{idx + 1} placed at {price_str} with qty {qty_str} for {symbol}")
                 except Exception as e:
-                    logger.error(f"❌ Bybit TP{i + 1} error for {symbol} at {tp}: {e}")
+                    logger.error(f"❌ Bybit TP{idx + 1} error for {symbol} at {tp}: {e}")
         return results
 
     @override

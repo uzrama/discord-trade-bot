@@ -108,7 +108,14 @@ class ProcessTrackerEventUseCase:
                     logger.info(f"🎯 [USE CASE] Take profit {tp_price} reached for {symbol}!")
 
                     # Calculate TP quantity based on distribution
-                    if position.tp_index_hit < len(position.tp_distribution):
+                    # For the last TP: close entire remaining quantity to avoid rounding issues
+                    is_last_tp = position.tp_index_hit == len(position.take_profits) - 1
+
+                    if is_last_tp:
+                        # Last TP: close all remaining quantity
+                        tp_qty = position.remaining_qty
+                        logger.info(f"📊 [USE CASE] Last TP - closing entire remaining quantity: {tp_qty:.8f}")
+                    elif position.tp_index_hit < len(position.tp_distribution):
                         tp_pct = position.tp_distribution[position.tp_index_hit].close_pct
                         tp_qty = position.qty * (tp_pct / 100.0)
                     else:
