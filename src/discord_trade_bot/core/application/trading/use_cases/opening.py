@@ -189,6 +189,9 @@ class OpenPositionUseCase:
             default_sl_pct=settings.default_sl_percent,
         )
 
+        # Determine if SL is default (not from signal)
+        is_default_sl = sig.stop_loss is None and final_sl is not None
+
         # Place SL/TP with retry logic (position is now guaranteed to exist)
         sl_tp_res = {}
         if final_sl or sig.take_profits:
@@ -232,6 +235,7 @@ class OpenPositionUseCase:
             qty=qty,
             entry_price=market_price,
             final_sl=final_sl,
+            is_default_sl=is_default_sl,
             exchange_name=exchange_name,
             pending=False,
         )
@@ -269,6 +273,9 @@ class OpenPositionUseCase:
             side=side,
             default_sl_pct=settings.default_sl_percent,
         )
+
+        # Determine if SL is default (not from signal)
+        is_default_sl = sig.stop_loss is None and final_sl is not None
 
         # Place SL + TP immediately for maximum protection
         # These are conditional orders that only trigger if position exists
@@ -365,6 +372,7 @@ class OpenPositionUseCase:
             qty=qty,
             entry_price=limit_price,
             final_sl=final_sl,
+            is_default_sl=is_default_sl,
             exchange_name=exchange_name,
             pending=True,
         )

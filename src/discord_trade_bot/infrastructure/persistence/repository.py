@@ -71,6 +71,10 @@ class SqliteStateRepository(StateRepositoryProtocol):
         try:
             data = orjson.loads(row[0])
 
+            # Migration: Add is_default_sl field if missing (backward compatibility)
+            if "is_default_sl" not in data:
+                data["is_default_sl"] = False
+
             # Restore types manually (Infrastructure mapping)
             if "side" in data and isinstance(data["side"], str):
                 data["side"] = TradeSide(data["side"])

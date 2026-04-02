@@ -20,5 +20,6 @@ class OpenPositionResultDTO:
     qty: float = 0.0
     entry_price: float = 0.0
     final_sl: float | None = None
+    is_default_sl: bool = False  # True if SL was set from default_sl_percent
     exchange_name: str | None = None
     pending: bool = False  # True if limit order placed, False if market order filled

@@ -151,29 +151,50 @@ class HandleSignalUpdateUseCase:
         # Find position waiting for updates
         positions = await self._state_repository.get_open_positions_by_symbol_and_exchange(symbol=sig.symbol, exchange=source_cfg.exchange)
 
-        waiting_position = None
+        target_position = None
         for pos in positions:
-            if pos.status == PositionStatus.WAITING_UPDATE and pos.message_id == dto.message_id:
-                waiting_position = pos
-                break
+            if pos.message_id == dto.message_id:
+                # For WAITING_UPDATE: always allow update
+                if pos.status == PositionStatus.WAITING_UPDATE:
+                    target_position = pos
+                    break
+                # For OPEN with default SL: allow update if signal has new SL
+                elif pos.status == PositionStatus.OPEN and pos.is_default_sl and sig.stop_loss is not None:
+                    target_position = pos
+                    break
 
-        if not waiting_position:
-            logger.info(f"No position waiting for update: {sig.symbol} on {source_cfg.exchange}")
+        if not target_position:
+            logger.info(f"No position found for update: {sig.symbol} on {source_cfg.exchange} (message_id: {dto.message_id})")
             return SignalProcessingResultDTO(
                 success=False,
                 message_id=dto.message_id,
-                reason="No position waiting for update",
+                reason="No position found for update",
             )
 
         # Check if we got new SL/TP data
         # For SL: check if signal has SL AND it's different from current SL
         # For TP: check if signal has TPs AND position is waiting for TP update
-        got_new_stop = sig.stop_loss is not None and sig.stop_loss != waiting_position.stop_loss
-        got_new_tps = bool(sig.take_profits) and waiting_position.needs_signal_tp_update
+
+        # For OPEN with default SL: accept any SL from signal (replaces default)
+        if target_position.status == PositionStatus.OPEN and target_position.is_default_sl:
+            got_new_stop = sig.stop_loss is not None
+        else:
+            # For WAITING_UPDATE or OPEN with real SL: check if SL changed
+            got_new_stop = sig.stop_loss is not None and sig.stop_loss != target_position.stop_loss
+
+        # For TP: check based on status
+        if target_position.status == PositionStatus.WAITING_UPDATE:
+            got_new_tps = bool(sig.take_profits) and target_position.needs_signal_tp_update
+        else:  # OPEN
+            # For OPEN: check if TP list changed
+            got_new_tps = bool(sig.take_profits) and sig.take_profits != target_position.take_profits
 
         if not got_new_stop and not got_new_tps:
             logger.info(
-                f"Signal update for {sig.symbol} but no new SL/TP data (needs_stop={waiting_position.needs_signal_stop_update}, needs_tp={waiting_position.needs_signal_tp_update})"
+                f"Signal update for {sig.symbol} but no new SL/TP data "
+                f"(status={target_position.status}, is_default_sl={target_position.is_default_sl}, "
+                f"current_sl={target_position.stop_loss}, new_sl={sig.stop_loss}, "
+                f"current_tps={target_position.take_profits}, new_tps={sig.take_profits})"
             )
             return SignalProcessingResultDTO(
                 success=False,
@@ -181,18 +202,33 @@ class HandleSignalUpdateUseCase:
                 reason="No new SL/TP data in update",
             )
 
-        logger.info(f"Processing signal update for {sig.symbol}: got_new_stop={got_new_stop}, got_new_tps={got_new_tps}")
+        logger.info(
+            f"Processing signal update for {sig.symbol}: "
+            f"position_status={target_position.status}, "
+            f"got_new_stop={got_new_stop} (old={target_position.stop_loss}, new={sig.stop_loss}), "
+            f"got_new_tps={got_new_tps} (old={target_position.take_profits}, new={sig.take_profits})"
+        )
+
+        # Track if SL was default before update (for notification)
+        was_default = target_position.is_default_sl
 
         # Update position with new SL/TP
         if got_new_stop:
-            waiting_position.stop_loss = sig.stop_loss
-            waiting_position.needs_signal_stop_update = False
-            waiting_position.temporary_stop = None
-            logger.info(f"Updated SL for {sig.symbol}: {sig.stop_loss}")
+            old_sl = target_position.stop_loss
+
+            target_position.stop_loss = sig.stop_loss
+            target_position.is_default_sl = False  # Now SL is from signal, not default
+            target_position.needs_signal_stop_update = False
+            target_position.temporary_stop = None
+
+            if was_default:
+                logger.info(f"Replaced default SL with signal SL for {sig.symbol}: {old_sl} (default) → {sig.stop_loss} (from signal)")
+            else:
+                logger.info(f"Updated SL for {sig.symbol}: {old_sl} → {sig.stop_loss}")
 
         if got_new_tps:
-            waiting_position.take_profits = sig.take_profits
-            waiting_position.needs_signal_tp_update = False
+            target_position.take_profits = sig.take_profits
+            target_position.needs_signal_tp_update = False
 
             # Update TP distribution
             tp_distributions_dict: dict[int, list[dict[str, Any]]] = {}
@@ -203,12 +239,12 @@ class HandleSignalUpdateUseCase:
             if num_tps in tp_distributions_dict:
                 from discord_trade_bot.core.domain.value_objects.trading import TPDistributionRow
 
-                waiting_position.tp_distribution = [TPDistributionRow(label=tp["label"], close_pct=tp["close_pct"]) for tp in tp_distributions_dict[num_tps]]
+                target_position.tp_distribution = [TPDistributionRow(label=tp["label"], close_pct=tp["close_pct"]) for tp in tp_distributions_dict[num_tps]]
 
             logger.info(f"Updated TPs for {sig.symbol}: {sig.take_profits}")
 
         # Update message hash
-        waiting_position.message_hash = sig.message_hash
+        target_position.message_hash = sig.message_hash
 
         # Rebuild position risk orders (cancel old SL/TP and place new ones)
         exchange = self._exchange_registry.get_exchange(source_cfg.exchange)
@@ -216,19 +252,19 @@ class HandleSignalUpdateUseCase:
         try:
             # Prepare keep_order_ids (entry order should be kept if it exists)
             keep_order_ids = set()
-            if waiting_position.order_id:
-                keep_order_ids.add(str(waiting_position.order_id))
+            if target_position.order_id:
+                keep_order_ids.add(str(target_position.order_id))
 
             # Rebuild risk orders (cancel old SL/TP, place new ones)
             sl_tp_res = await self._rebuild_position_risk_orders(
                 exchange=exchange,
                 symbol=sig.symbol,
-                side=waiting_position.side,
-                stop_loss=waiting_position.stop_loss,
-                take_profits=waiting_position.take_profits,
-                qty=waiting_position.remaining_qty or waiting_position.qty,
-                tp_distribution={len(waiting_position.take_profits): [{"label": tp.label, "close_pct": tp.close_pct} for tp in waiting_position.tp_distribution]}
-                if waiting_position.tp_distribution
+                side=target_position.side,
+                stop_loss=target_position.stop_loss,
+                take_profits=target_position.take_profits,
+                qty=target_position.remaining_qty or target_position.qty,
+                tp_distribution={len(target_position.take_profits): [{"label": tp.label, "close_pct": tp.close_pct} for tp in target_position.tp_distribution]}
+                if target_position.tp_distribution
                 else {},
                 keep_order_ids=keep_order_ids,
             )
@@ -236,35 +272,46 @@ class HandleSignalUpdateUseCase:
             # Update order IDs
             sl_order = sl_tp_res.get("stop_loss")
             if sl_order:
-                waiting_position.sl_order_id = str(sl_order.get("algoId") or sl_order.get("orderId") or "")
+                target_position.sl_order_id = str(sl_order.get("algoId") or sl_order.get("orderId") or "")
 
             tp_order_ids = {}
             for i, tp_order in enumerate(sl_tp_res.get("take_profits", [])):
                 order_id = tp_order.get("algoId") or tp_order.get("orderId")
-                if order_id and i < len(waiting_position.take_profits):
-                    tp_price = float(waiting_position.take_profits[i])
+                if order_id and i < len(target_position.take_profits):
+                    tp_price = float(target_position.take_profits[i])
                     tp_order_ids[str(order_id)] = tp_price
-            waiting_position.tp_order_ids = tp_order_ids
+            target_position.tp_order_ids = tp_order_ids
 
-            logger.info(f"✅ Rebuilt SL/TP for {sig.symbol}: SL={waiting_position.stop_loss}, TPs={waiting_position.take_profits}")
+            logger.info(f"✅ Rebuilt SL/TP for {sig.symbol}: SL={target_position.stop_loss}, TPs={target_position.take_profits}")
 
         except Exception as e:
             logger.error(f"❌ Failed to rebuild SL/TP for {sig.symbol}: {e}")
             await self._notification_gateway.send_message(f"⚠️ Failed to rebuild SL/TP for {sig.symbol}: {e}")
             return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Failed to rebuild SL/TP: {e}")
 
-        # Update status to OPEN (no longer waiting for updates)
-        waiting_position.status = PositionStatus.OPEN
+        # Update status to OPEN only if it was WAITING_UPDATE
+        if target_position.status == PositionStatus.WAITING_UPDATE:
+            target_position.status = PositionStatus.OPEN
+            logger.info(f"Position status changed from WAITING_UPDATE to OPEN for {sig.symbol}")
+        # If already OPEN, keep it OPEN (just updated SL/TP)
 
         # Save updated position
-        await self._state_repository.save_position(waiting_position)
+        await self._state_repository.save_position(target_position)
 
         # Send notification
-        message = f"✅ Updated {sig.symbol} with SL/TP from signal edit"
-        if waiting_position.stop_loss:
-            message += f"\nSL: {waiting_position.stop_loss}"
-        if waiting_position.take_profits:
-            message += f"\nTPs: {', '.join(str(tp) for tp in waiting_position.take_profits)}"
+        if target_position.status == PositionStatus.OPEN and got_new_stop and was_default:
+            # Replaced default SL with signal SL
+            message = f"✅ Replaced default SL with signal SL for {sig.symbol}\n🛡 Stop Loss: {target_position.stop_loss}"
+        elif got_new_stop and got_new_tps:
+            message = f"✅ Updated {sig.symbol} with SL/TP from signal edit"
+            if target_position.stop_loss:
+                message += f"\n🛡 Stop Loss: {target_position.stop_loss}"
+            if target_position.take_profits:
+                message += f"\n🎯 Take Profits: {', '.join(str(tp) for tp in target_position.take_profits)}"
+        elif got_new_stop:
+            message = f"✅ Updated SL for {sig.symbol}\n🛡 Stop Loss: {target_position.stop_loss}"
+        else:  # got_new_tps
+            message = f"✅ Updated TPs for {sig.symbol}\n🎯 Take Profits: {', '.join(str(tp) for tp in target_position.take_profits)}"
 
         await self._notification_gateway.send_message(message)
 

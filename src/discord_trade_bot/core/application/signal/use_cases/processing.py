@@ -269,6 +269,7 @@ class ProcessSignalUseCase:
                     qty=res.qty,
                     entry_price=res.entry_price,
                     stop_loss=res.final_sl,
+                    is_default_sl=res.is_default_sl,
                     take_profits=sig.take_profits,
                     order_id=entry_order_id,
                     sl_order_id=sl_order_id,
