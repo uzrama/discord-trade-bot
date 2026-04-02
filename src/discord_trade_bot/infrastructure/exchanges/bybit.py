@@ -14,11 +14,12 @@ logger = logging.getLogger(__name__)
 
 @final
 class BybitFuturesAdapter(BaseExchangeAdapter):
-    def __init__(self, api_key: str, api_secret: str, testnet: bool = False):
+    def __init__(self, api_key: str, api_secret: str, testnet: bool = False, demo: bool = False):
         self.api_key = api_key
         self.api_secret = api_secret
         self.testnet = testnet  # Store testnet parameter for WebSocket
-        self.session = HTTP(demo=True, testnet=testnet, api_key=self.api_key, api_secret=self.api_secret, recv_window=5000)
+        self.demo = demo  # Store demo parameter for HTTP and WebSocket
+        self.session = HTTP(demo=self.demo, testnet=testnet, api_key=self.api_key, api_secret=self.api_secret, recv_window=5000)
         self._ws: WebSocket | None = None
         self._stop_event = asyncio.Event()
         self._symbol_info_cache: dict[str, dict[str, Any]] = {}  # Cache for symbol info
@@ -347,7 +348,7 @@ class BybitFuturesAdapter(BaseExchangeAdapter):
 
         try:
             logger.info(f"📡 Connecting to Bybit WebSocket (testnet={self.testnet}) via pybit...")
-            self._ws = WebSocket(testnet=False, demo=True, channel_type="private", api_key=self.api_key, api_secret=self.api_secret)
+            self._ws = WebSocket(testnet=False, demo=self.demo, channel_type="private", api_key=self.api_key, api_secret=self.api_secret)
 
             # Subscribe to order events
             self._ws.order_stream(callback=handle_order_msg)

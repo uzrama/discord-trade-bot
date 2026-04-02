@@ -47,7 +47,8 @@ class TradingProvider(Provider):
             if bybit_api_key and bybit_secret:
                 bybit_config = config.yaml.exchanges.get("bybit")
                 bybit_testnet = bybit_config.testnet if bybit_config and bybit_config.testnet is not None else config.yaml.general.mode == AppMode.TESTNET
-                exchanges["bybit"] = BybitFuturesAdapter(bybit_api_key, bybit_secret, testnet=bybit_testnet)
+                bybit_demo = bybit_config.demo if bybit_config and bybit_config.demo is not None else False
+                exchanges["bybit"] = BybitFuturesAdapter(bybit_api_key, bybit_secret, testnet=bybit_testnet, demo=bybit_demo)
                 logger.info("✅ Bybit exchange configured")
             else:
                 logger.warning("⚠️ Bybit API keys are empty, skipping Bybit exchange")
