@@ -9,6 +9,30 @@ from discord_trade_bot.core.shared.utils.parsing import safe_float
 from discord_trade_bot.core.shared.utils.text import normalize_symbol, sha1_text
 
 
+def _preprocess_signal_text(raw_text: str) -> str:
+    """
+    Preprocess signal text.
+    Removes Discord UI noise and normalizes symbols.
+
+    Ported from bot_fixed (v6) lines 2922-2929.
+    """
+    raw_lines = []
+    for raw_line in raw_text.splitlines():
+        line_up = str(raw_line or "").upper()
+        # Filter Discord UI lines
+        if "ОТКРЫТЬ ВЕТКУ" in line_up or "OPEN THREAD" in line_up:
+            continue
+        if "В ЭТОЙ ВЕТКЕ ПОКА НЕТ СООБЩЕНИЙ" in line_up:
+            continue
+        if "THERE ARE NO MESSAGES IN THIS THREAD YET" in line_up:
+            continue
+        raw_lines.append(raw_line)
+
+    # Normalize symbols
+    processed = "\n".join(raw_lines).replace("·", "\u2022")
+    return processed
+
+
 @final
 class SignalParserService:
     """
@@ -108,7 +132,8 @@ class SignalParserService:
 
     def parse(self, source_id: str, message_id: str, text: str) -> ParsedSignalEntity:
         raw = text or ""
-        text_up = raw.upper()
+        processed_text = _preprocess_signal_text(raw)
+        text_up = processed_text.upper()
         msg_hash = sha1_text(raw)
 
         sig = ParsedSignalEntity(
@@ -118,13 +143,13 @@ class SignalParserService:
             message_text=raw,
         )
 
-        if not raw.strip():
+        if not processed_text.strip():
             return sig
 
         context = {"symbol_rank": -1, "side_rank": -1}
 
-        self._parse_headline(raw, sig, context)
-        self._parse_lines(raw, sig, context)
+        self._parse_headline(processed_text, sig, context)
+        self._parse_lines(processed_text, sig, context)
         self._parse_headers(text_up, sig, context)
         self._parse_generic_patterns(text_up, sig, context)
         self._parse_fallback_symbols(text_up, sig, context)
@@ -193,17 +218,60 @@ class SignalParserService:
         self._set_field_with_rank(sig, context, "side", normalized, rank)
 
     def _parse_headline(self, raw: str, sig: ParsedSignalEntity, context: dict[str, int]) -> None:
+        # Check if LONG/SHORT exists in the text
+        text_up = raw.upper()
+        has_direction = " LONG" in text_up or " SHORT" in text_up
+
+        if not has_direction:
+            return
+
         for line in raw.splitlines():
             line_up = line.upper().strip()
-            if "•" not in line_up or (" LONG" not in line_up and " SHORT" not in line_up):
+            if "•" not in line_up:
                 continue
+
             parts = [p.strip() for p in line_up.split("•") if p.strip()]
+
+            # Search for symbol and side in different parts
+            symbol_candidates = []
+            side_candidate = None
+
             for part in parts:
+                # Standard pattern: "SYMBOL LONG/SHORT"
                 m = self._RE_HEADLINE.match(part)
                 if m:
                     self._set_symbol(sig, context, m.group(1), rank=100)
-                    self._set_side(sig, context, m.group(2))
+                    self._set_side(sig, context, m.group(2), rank=100)
                     break
+
+                # Pattern with SHORT/LONG SIGNAL
+                if "SHORT SIGNAL" in part or "LONG SIGNAL" in part:
+                    if "SHORT SIGNAL" in part:
+                        side_candidate = "SHORT"
+                    else:
+                        side_candidate = "LONG"
+
+                # Just LONG or SHORT in the part
+                if not side_candidate:
+                    if part == "LONG" or part.endswith(" LONG") or part.startswith("LONG "):
+                        side_candidate = "LONG"
+                    elif part == "SHORT" or part.endswith(" SHORT") or part.startswith("SHORT "):
+                        side_candidate = "SHORT"
+
+                # Extract all possible symbols from the part
+                # Search for words in capital letters with length 2-20 characters
+                for match in re.finditer(r"\b([A-Z]{2,20})(?:\s+#\d+|\b)", part):
+                    candidate = match.group(1)
+                    # Exclude service words
+                    if candidate not in self.BANNED_WORDS and candidate not in {"LONG", "SHORT", "BUY", "SELL", "SIGNAL"}:
+                        symbol_candidates.append(candidate)
+
+            # Take the last found symbol (usually the most relevant)
+            if symbol_candidates:
+                self._set_symbol(sig, context, symbol_candidates[-1], rank=100)
+            if side_candidate:
+                self._set_side(sig, context, side_candidate, rank=100)
+
             if sig.symbol and sig.side:
                 break
 
@@ -302,18 +370,118 @@ class SignalParserService:
                     break
 
     def _parse_leverage_and_stops(self, text_up: str, sig: ParsedSignalEntity) -> None:
+        """
+        Parse leverage, stop loss and take profits.
+        Includes advanced TP extraction from sections.
+
+        Ported from bot_fixed (v6) lines 3151-3234.
+        """
+        # Leverage
         if m := self._RE_LEVERAGE.search(text_up):
             sig.leverage = int(m.group(1))
 
+        # Stop Loss
         if m := self._RE_SL.search(text_up):
             sig.stop_loss = safe_float(m.group(1))
 
+        # ========== ADVANCED TP PARSING ==========
         tp_matches = []
+
+        # 1) Standard patterns with labels
         tp_matches.extend(self._RE_TP_1.findall(text_up))
         tp_matches.extend(self._RE_TP_2.findall(text_up))
 
+        # 2) Section extraction: search for "TAKE PROFIT TARGETS" / "PROFIT TARGETS" block
+        # and extract all numbers from lines until the next section
+        section_match = re.search(
+            r"(?:TAKE\s*PROFIT\s*TARGETS?|PROFIT\s*TARGETS?|TARGETS?|TPS?)\s*[:\-]?\s*(.+?)"
+            r"(?:\n\s*(?:SL|STOP\s*LOSS|ENTRY|LEVERAGE|TRADE\s*NOW|BYBIT|MEXC|BLOFIN|BITGET|"
+            r"ACTIVE\s*TRADE|BREAKEVEN|DCA(?:\s*LEVELS?)?|NOTES?|CALLER|CURRENT|P&L|"
+            r"FINAL\s*PRICE|CLOSED|STATUS)\b|$)",
+            text_up,
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        if section_match:
+            section_text = section_match.group(1)
+            for line in section_text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Skip service lines and lines with SL
+                if re.search(
+                    r"\b(?:SL|STOP\s*LOSS|LEVERAGE|TRADE\s*NOW|BYBIT|MEXC|BLOFIN|BITGET|AO\s*TRADING|"
+                    r"WIN\s*TOGETHER|DCA(?:\s*LEVELS?)?|NOTES?|CALLER|CURRENT|P&L|"
+                    r"FINAL\s*PRICE|CLOSED)\b",
+                    line,
+                    re.IGNORECASE,
+                ):
+                    continue
+
+                # Extract numbers from the line
+                # Support formats: "✅ TP1: $0.022120", "1) 0.0112", "- 0.0114", "0.0116 ✅"
+                nums = re.findall(r"\$?([0-9]+(?:\.[0-9]+)?)", line)
+                if nums:
+                    tp_matches.append(nums[-1])  # Take the last number in the line
+
+        # 3) Fallback: line-by-line extraction after TP header
+        if len(tp_matches) < 3 and re.search(r"\b(?:TAKE\s*PROFIT\s*TARGETS?|PROFIT\s*TARGETS?|TPS?)\b", text_up):
+            in_tp_block = False
+            for raw_line in text_up.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+
+                # Start of TP block
+                if re.search(r"\b(?:TAKE\s*PROFIT\s*TARGETS?|PROFIT\s*TARGETS?|TPS?)\b", line, re.IGNORECASE):
+                    in_tp_block = True
+                    continue
+
+                # End of TP block
+                if in_tp_block and re.search(
+                    r"\b(?:SL|STOP\s*LOSS|ENTRY|LEVERAGE|TRADE\s*NOW|BYBIT|MEXC|BLOFIN|BITGET|"
+                    r"ACTIVE\s*TRADE|BREAKEVEN|DCA(?:\s*LEVELS?)?|NOTES?|CALLER|CURRENT|P&L|"
+                    r"FINAL\s*PRICE|CLOSED)\b",
+                    line,
+                    re.IGNORECASE,
+                ):
+                    break
+
+                if not in_tp_block:
+                    continue
+
+                # Extract numbers from the line
+                nums = re.findall(r"\$?([0-9]+(?:\.[0-9]+)?)", line)
+                if len(nums) == 1:
+                    tp_matches.append(nums[0])
+                elif len(nums) > 1:
+                    tp_matches.append(nums[-1])
+
+        # Deduplication and saving
         sig.take_profits = dedupe_float_levels([v for v in (safe_float(m) for m in tp_matches) if v is not None])
+
+        # ========== TRACKING COMPLETED TPs ==========
+        # Update contains_tp1_hit based on completion markers
         sig.contains_tp1_hit = bool(self._RE_TP_HIT.search(text_up))
+
+        # Additional check: if there's TP1 with checkmark/marker
+        if not sig.contains_tp1_hit:
+            for raw_line in text_up.splitlines():
+                line = str(raw_line or "").strip()
+                if not line:
+                    continue
+
+                # Search for TP1 in the line
+                if re.search(r"\bTP\s*1\b", line, re.IGNORECASE):
+                    # Check for completion markers
+                    has_completed_word = bool(re.search(r"\b(HIT|REACHED|DONE|SECURED|FILLED|CLOSED)\b", line))
+                    has_completed_mark = any(mark in line for mark in ("✅", "✔", "☑", "✓"))
+
+                    if has_completed_word or has_completed_mark:
+                        sig.contains_tp1_hit = True
+                        break
+
         sig.entry_triggered = bool(self._RE_TRIGGERED.search(text_up))
 
     def _finalize_signal_type(self, text_up: str, sig: ParsedSignalEntity) -> None:
