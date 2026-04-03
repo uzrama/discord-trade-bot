@@ -95,7 +95,7 @@ class SignalParserService:
     _RE_SYMBOL_SIDE_1 = re.compile(r"\b([A-Z0-9]{2,20})(?:/USDT|USDT)?\s+(LONG|SHORT)\s+SIGNAL\b")
     _RE_SIDE_SYMBOL_2 = re.compile(r"\b(BUY|SELL|LONG|SHORT)\s+([A-Z0-9]{2,20})(?:/USDT\b|USDT\b|\b)")
     _RE_NEW_SIGNAL = re.compile(r"NEW\s+SIGNAL\s*[•\-\|:]\s*([A-Z0-9]{2,20})\s*[•\-\|:]\s*ENTRY\s*\$?([0-9]+(?:\.[0-9]+)?)")
-    _RE_ENTRY = re.compile(r"\bENTRY(?:\s+PRICE)?\s*[:\-]?\s*\$?([0-9]+(?:\.[0-9]+)?)")
+    _RE_ENTRY = re.compile(r"\bENTRY(?:\s+PRICE)?\s*[:\-]?\s*`?\$?([0-9]+(?:\.[0-9]+)?)`?")
 
     _RE_EXPLICIT_HEADERS = (
         re.compile(r"NEW\s+SIGNAL\s*[•\-\|:]\s*([A-Z0-9]{2,20})\s*[•\-\|:]\s*ENTRY"),
@@ -117,16 +117,16 @@ class SignalParserService:
 
     _RE_ENTRY_CMP = re.compile(r"ENTRY\s*[:\-]\s*CMP\b")
     _RE_ENTRY_PATTERNS = (
-        re.compile(r"\bENTRY(?:\s+PRICE)?\s*[:\-]?\s*\$?([0-9]+(?:\.[0-9]+)?)"),
-        re.compile(r"\bENTRY\s+FILLED\s+AT\s*\$?([0-9]+(?:\.[0-9]+)?)"),
-        re.compile(r"\bTRIGGERED\s+AT\s*\$?([0-9]+(?:\.[0-9]+)?)"),
-        re.compile(r"NEW\s+SIGNAL\s*[•\-\|:]\s*[A-Z0-9]{2,20}\s*[•\-\|:]\s*ENTRY\s*\$?([0-9]+(?:\.[0-9]+)?)"),
+        re.compile(r"\bENTRY(?:\s+PRICE)?\s*[:\-]?\s*`?\$?([0-9]+(?:\.[0-9]+)?)`?"),
+        re.compile(r"\bENTRY\s+FILLED\s+AT\s*`?\$?([0-9]+(?:\.[0-9]+)?)`?"),
+        re.compile(r"\bTRIGGERED\s+AT\s*`?\$?([0-9]+(?:\.[0-9]+)?)`?"),
+        re.compile(r"NEW\s+SIGNAL\s*[•\-\|:]\s*[A-Z0-9]{2,20}\s*[•\-\|:]\s*ENTRY\s*`?\$?([0-9]+(?:\.[0-9]+)?)`?"),
     )
 
     _RE_LEVERAGE = re.compile(r"\b([0-9]{1,3})\s*X\b")
-    _RE_SL = re.compile(r"\b(?:SL|STOP\s*LOSS|STOP-LOSS)\s*[:\-]?\s*\$?([0-9]+(?:\.[0-9]+)?)")
-    _RE_TP_1 = re.compile(r"\b(?:TP|TARGET|TAKE\s*PROFIT)\s*[0-9]+\s*[:\-]?\s*\$?([0-9]+(?:\.[0-9]+)?)")
-    _RE_TP_2 = re.compile(r"\bTP[L]?[0-9]*\s*[:\-]?\s*\$?([0-9]+(?:\.[0-9]+)?)")
+    _RE_SL = re.compile(r"\b(?:SL|STOP\s*LOSS|STOP-LOSS)\s*[:\-]?\s*`?\$?([0-9]+(?:\.[0-9]+)?)`?")
+    _RE_TP_1 = re.compile(r"\b(?:TP|TARGET|TAKE\s*PROFIT)\s*[0-9]+\s*[:\-]?\s*`?\$?([0-9]+(?:\.[0-9]+)?)`?")
+    _RE_TP_2 = re.compile(r"\bTP[L]?[0-9]*\s*[:\-]?\s*`?\$?([0-9]+(?:\.[0-9]+)?)`?")
     _RE_TP_HIT = re.compile(r"\b(TP1\s*HIT|TARGET\s*1\s*REACHED|NEXT\s*TARGET\s*[:\-]\s*TP2)\b")
     _RE_TRIGGERED = re.compile(r"\bENTRY\b[\s\S]{0,40}\bTRIGGERED\b|\bENTRY\s+TRIGGERED\b|\bACTIVE\s+TRADE\b|\bBREAKEVEN\b")
 
@@ -420,8 +420,8 @@ class SignalParserService:
                     continue
 
                 # Extract numbers from the line
-                # Support formats: "✅ TP1: $0.022120", "1) 0.0112", "- 0.0114", "0.0116 ✅"
-                nums = re.findall(r"\$?([0-9]+(?:\.[0-9]+)?)", line)
+                # Support formats: "✅ TP1: $0.022120", "1) 0.0112", "- 0.0114", "0.0116 ✅", "`$0.022120`"
+                nums = re.findall(r"`?\$?([0-9]+(?:\.[0-9]+)?)`?", line)
                 if nums:
                     tp_matches.append(nums[-1])  # Take the last number in the line
 
@@ -452,7 +452,7 @@ class SignalParserService:
                     continue
 
                 # Extract numbers from the line
-                nums = re.findall(r"\$?([0-9]+(?:\.[0-9]+)?)", line)
+                nums = re.findall(r"`?\$?([0-9]+(?:\.[0-9]+)?)`?", line)
                 if len(nums) == 1:
                     tp_matches.append(nums[0])
                 elif len(nums) > 1:

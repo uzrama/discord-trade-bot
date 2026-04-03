@@ -688,3 +688,57 @@ class TestAdvancedTPParsing:
         assert result.is_signal is True
         assert len(result.take_profits) >= 2
         assert 2950.0 in result.take_profits
+
+    def test_parse_signal_with_backtick_wrapped_numbers(self, parser):
+        """Test parsing numbers wrapped in backticks (markdown code format)."""
+        # Arrange
+        text = """
+        BTCUSDT LONG
+        Entry: `50000.5`
+        Stop Loss: `48000.25`
+        TP1: `51000.75`
+        TP2: `52000.00`
+        Leverage: 20x
+        """
+
+        # Act
+        result = parser.parse("test", "msg_backtick", text)
+
+        # Assert
+        assert result.is_signal is True
+        assert result.entry_price == 50000.5
+        assert result.stop_loss == 48000.25
+        assert 51000.75 in result.take_profits
+        assert 52000.0 in result.take_profits
+
+    def test_parse_real_puffer_signal_with_backticks(self, parser):
+        """Test parsing real PUFFER signal with backtick-wrapped entry price."""
+        # Arrange
+        text = """
+        AO Algo • PUFFER 2
+        🔴 SHORT SIGNAL • Leverage: 25x
+        
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        📊 ENTRY
+        `$0.022300` ✅ Triggered
+        🎯 PROFIT TARGETS
+        ✅ TP1: $0.022120
+        ✅ TP2: $0.021940
+        ✅ TP3: $0.021410
+        ⬜ TP4: $0.013380
+        🛑 SL: $0.05
+        """
+
+        # Act
+        result = parser.parse("ao_algo", "msg_puffer_backtick", text)
+
+        # Assert
+        assert result.is_signal is True
+        assert result.symbol == "PUFFERUSDT"
+        assert result.side == TradeSide.SHORT
+        assert result.entry_price == 0.022300
+        assert result.entry_mode == EntryMode.EXACT_PRICE
+        assert result.stop_loss == 0.05
+        assert len(result.take_profits) == 4
+        assert result.leverage == 25
+        assert result.entry_triggered is True
