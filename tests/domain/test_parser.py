@@ -480,3 +480,211 @@ class TestSignalParserService:
 
             # Assert
             assert result.symbol == expected_symbol, f"Failed for text: {text}"
+
+
+# ========================================================================
+# Advanced TP Parsing Tests (bot_fixed v6 compatibility)
+# ========================================================================
+
+
+class TestAdvancedTPParsing:
+    """Test suite for advanced TP parsing features from bot_fixed v6."""
+
+    @pytest.fixture
+    def parser(self):
+        """Create a parser instance for testing."""
+        return SignalParserService()
+
+    def test_parse_production_puffer_signal(self, parser):
+        """Test parsing real production PUFFER signal from AO Algo."""
+        # Arrange
+        text = """
+        AO Algo • PUFFER #2
+        🔴 SHORT SIGNAL • Leverage: 25x
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        📊 ENTRY
+        $0.022300 ✅ Triggered
+        🎯 PROFIT TARGETS
+        ✅ TP1: $0.022120
+        ✅ TP2: $0.021940
+        ✅ TP3: $0.021410
+        ⬜ TP4: $0.013380
+        🛑 SL: $0.024810
+        ​
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        📊 STATS
+        Closed P&L: +100% 🟢
+        TP profit secured
+        Trade closed
+        STATUS
+        ✅ CLOSED
+        PUFFER #2
+        📊 TRADE NOW
+        ByBit • MEXC • Blofin • Bitget
+        ⚠️ Automated system • Low risk recommended • Not financial advice
+        """
+
+        # Act
+        result = parser.parse("ao_algo", "msg_puffer", text)
+
+        # Assert
+        assert result.is_signal is True
+        assert result.symbol == "PUFFERUSDT"
+        assert result.side == TradeSide.SHORT
+        assert result.entry_price == 0.022300
+        assert result.entry_triggered is True
+        assert result.leverage == 25
+        assert result.stop_loss == 0.024810
+        assert len(result.take_profits) == 4
+        assert 0.022120 in result.take_profits
+        assert 0.021940 in result.take_profits
+        assert 0.021410 in result.take_profits
+        assert 0.013380 in result.take_profits
+        assert result.contains_tp1_hit is True
+
+    def test_parse_unlabeled_tp_targets_in_section(self, parser):
+        """Test parsing unlabeled TP targets under PROFIT TARGETS header."""
+        # Arrange
+        text = """
+        BTCUSDT LONG
+        Entry: 50000
+        
+        PROFIT TARGETS:
+        1) 51000
+        2) 52000
+        3) 53000
+        
+        Stop Loss: 48000
+        """
+
+        # Act
+        result = parser.parse("channel_123", "msg_tp_section", text)
+
+        # Assert
+        assert result.is_signal is True
+        assert len(result.take_profits) == 3
+        assert 51000.0 in result.take_profits
+        assert 52000.0 in result.take_profits
+        assert 53000.0 in result.take_profits
+
+    def test_parse_tp_with_emoji_checkmarks(self, parser):
+        """Test parsing TP targets with emoji completion checkmarks."""
+        # Arrange
+        text = """
+        ETHUSDT SHORT
+        Entry: 3000
+        
+        PROFIT TARGETS:
+        ✅ TP1: 2950
+        ✅ TP2: 2900
+        ⬜ TP3: 2850
+        
+        SL: 3100
+        """
+
+        # Act
+        result = parser.parse("channel_123", "msg_tp_emoji", text)
+
+        # Assert
+        assert len(result.take_profits) == 3
+        assert 2950.0 in result.take_profits
+        assert 2900.0 in result.take_profits
+        assert 2850.0 in result.take_profits
+        assert result.contains_tp1_hit is True
+
+    def test_parse_tp_with_dollar_signs_in_section(self, parser):
+        """Test parsing TP targets with dollar signs in section format."""
+        # Arrange
+        text = """
+        SOLUSDT LONG
+        Entry: $100
+        
+        🎯 PROFIT TARGETS
+        ✅ TP1: $105
+        ✅ TP2: $110
+        ⬜ TP3: $115
+        
+        🛑 SL: $95
+        """
+
+        # Act
+        result = parser.parse("channel_123", "msg_tp_dollar", text)
+
+        # Assert
+        assert len(result.take_profits) == 3
+        assert 105.0 in result.take_profits
+        assert 110.0 in result.take_profits
+        assert 115.0 in result.take_profits
+
+    def test_parse_discord_thread_noise_filtered(self, parser):
+        """Test that Discord thread UI text is filtered out."""
+        # Arrange
+        text = """
+        ОТКРЫТЬ ВЕТКУ
+        BTCUSDT LONG
+        Entry: 50000
+        OPEN THREAD
+        TP1: 51000
+        В ЭТОЙ ВЕТКЕ ПОКА НЕТ СООБЩЕНИЙ
+        """
+
+        # Act
+        result = parser.parse("channel_123", "msg_thread", text)
+
+        # Assert
+        assert result.is_signal is True
+        assert result.symbol == "BTCUSDT"
+        assert result.side == TradeSide.LONG
+
+    def test_parse_bullet_normalization(self, parser):
+        """Test that middle dot (·) is normalized to bullet (•)."""
+        # Arrange
+        text = "AO ALGO · BTCUSDT · LONG · Entry: 50000"
+
+        # Act
+        result = parser.parse("channel_123", "msg_bullet", text)
+
+        # Assert
+        assert result.is_signal is True
+        assert result.symbol == "BTCUSDT"
+        assert result.side == TradeSide.LONG
+
+    def test_parse_tp1_hit_with_checkmark(self, parser):
+        """Test that TP1 with checkmark is detected as hit."""
+        # Arrange
+        text = """
+        BTCUSDT LONG
+        Entry: 50000
+        ✅ TP1: 51000 HIT
+        TP2: 52000
+        TP3: 53000
+        """
+
+        # Act
+        result = parser.parse("channel_123", "msg_tp1_check", text)
+
+        # Assert
+        assert result.contains_tp1_hit is True
+
+    def test_parse_mixed_tp_formats_in_one_signal(self, parser):
+        """Test parsing signal with mixed TP formats."""
+        # Arrange
+        text = """
+        ETHUSDT SHORT
+        Entry: 3000
+        
+        TARGETS:
+        ✅ TP1: $2950
+        - 2900
+        3) 2850 ✅
+        
+        SL: 3100
+        """
+
+        # Act
+        result = parser.parse("channel_123", "msg_mixed_tp", text)
+
+        # Assert
+        assert result.is_signal is True
+        assert len(result.take_profits) >= 2
+        assert 2950.0 in result.take_profits
