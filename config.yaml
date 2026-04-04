@@ -8,7 +8,7 @@ discord:
       exchange: bybit
       fixed_leverage: 5
       default_sl_percent: 0.5
-      position_size_pct: 3
+      position_size_pct: 0.5
       stale_signal_seconds: 120
       max_price_deviation_pct: 2.0
       move_to_breakeven_on_tp1: true

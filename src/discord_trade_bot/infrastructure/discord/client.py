@@ -41,11 +41,11 @@ class DiscordSelfAdapter(discord.Client):
             logger.info(f"  - {cid} ({name})")
 
     async def on_message(self, message: discord.Message):
-        if message.channel.id not in self._watched_channel_ids:
-            return
+        text = ""
+        text = self._extract_full_text(message)
 
         source_id = self._channel_to_source_map.get(message.channel.id, str(message.channel.id))
-        dto = ProcessSignalDTO(source_id=source_id, channel_id=str(message.channel.id), message_id=str(message.id), text=message.content)
+        dto = ProcessSignalDTO(source_id=source_id, channel_id=str(message.channel.id), message_id=str(message.id), text=text)
 
         await self._on_message_callback(dto)
 
@@ -53,9 +53,10 @@ class DiscordSelfAdapter(discord.Client):
         """Handle message edits to process signal updates (e.g., added SL/TP)."""
         if after.channel.id not in self._watched_channel_ids:
             return
-
+        before_text = self._extract_full_text(before)
+        after_text = self._extract_full_text(after)
         # Only process if content actually changed
-        if before.content == after.content:
+        if before_text == after_text:
             return
 
         logger.info(f"Message edited in channel {after.channel.id}: {after.id}")
@@ -65,10 +66,19 @@ class DiscordSelfAdapter(discord.Client):
             source_id=source_id,
             channel_id=str(after.channel.id),
             message_id=str(after.id),
-            text=after.content,
+            text=after_text,
         )
 
         await self._on_message_callback(dto)
+
+    def _extract_full_text(self, message: discord.Message) -> str:
+        """Extract full text from message including embeds."""
+        text = message.content or ""
+        if message.embeds:
+            embed_text = message.embeds[0].description or ""
+            if embed_text:
+                text = f"{text}\n{embed_text}" if text else embed_text
+        return text
 
     async def stop_client(self):
         await self.close()

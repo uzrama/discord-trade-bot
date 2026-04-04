@@ -81,11 +81,13 @@ class SignalParserService:
             "BLOFIN",
             "BITGET",
             "ALGO",
+            "AO",
             "SHORTS",
             "LONGS",
             "TP",
             "SL",
             "NOW",
+            "CRUSHER",
         }
     )
 
