@@ -30,6 +30,11 @@ def _preprocess_signal_text(raw_text: str) -> str:
 
     processed = "\n".join(raw_lines)
 
+    # Remove Discord mentions
+    processed = re.sub(r"<@&\d+>", "", processed)  # Role mentions
+    processed = re.sub(r"<@!?\d+>", "", processed)  # User mentions
+    processed = re.sub(r"<#\d+>", "", processed)  # Channel mentions
+
     # Remove markdown formatting
     processed = re.sub(r"\*\*([^*]+)\*\*", r"\1", processed)  # **bold**
     processed = re.sub(r"\*([^*]+)\*", r"\1", processed)  # *italic*
