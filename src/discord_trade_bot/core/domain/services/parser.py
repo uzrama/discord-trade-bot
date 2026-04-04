@@ -253,12 +253,23 @@ class SignalParserService:
             symbol_candidates = []
             side_candidate = None
 
-            for part in parts:
+            for idx, part in enumerate(parts):
                 # Standard pattern: "SYMBOL LONG/SHORT"
                 m = self._RE_HEADLINE.match(part)
                 if m:
                     self._set_symbol(sig, context, m.group(1), rank=100)
                     self._set_side(sig, context, m.group(2), rank=100)
+
+                    # Check if next part contains entry price
+                    if idx + 1 < len(parts) and sig.entry_price is None:
+                        next_part = parts[idx + 1]
+                        price_match = re.search(r"\$?([0-9]+\.[0-9]+)", next_part)
+                        if price_match:
+                            sig.entry_price = safe_float(price_match.group(1))
+                            sig.entry_mode = EntryMode.EXACT_PRICE
+                            sig.is_signal = True
+                            if sig.signal_type == SignalType.UNKNOWN:
+                                sig.signal_type = SignalType.PRIMARY_SIGNAL
                     break
 
                 # Pattern with SHORT/LONG SIGNAL
@@ -288,6 +299,18 @@ class SignalParserService:
                 self._set_symbol(sig, context, symbol_candidates[-1], rank=100)
             if side_candidate:
                 self._set_side(sig, context, side_candidate, rank=100)
+
+            # Check if there's a price in the parts after symbol and side are found
+            if sig.symbol and sig.side and sig.entry_price is None:
+                for part in parts:
+                    price_match = re.search(r"\$?([0-9]+\.[0-9]+)", part)
+                    if price_match:
+                        sig.entry_price = safe_float(price_match.group(1))
+                        sig.entry_mode = EntryMode.EXACT_PRICE
+                        sig.is_signal = True
+                        if sig.signal_type == SignalType.UNKNOWN:
+                            sig.signal_type = SignalType.PRIMARY_SIGNAL
+                        break
 
             if sig.symbol and sig.side:
                 break
