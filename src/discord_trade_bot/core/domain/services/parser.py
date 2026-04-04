@@ -12,7 +12,7 @@ from discord_trade_bot.core.shared.utils.text import normalize_symbol, sha1_text
 def _preprocess_signal_text(raw_text: str) -> str:
     """
     Preprocess signal text.
-    Removes Discord UI noise and normalizes symbols.
+    Removes Discord UI noise, markdown formatting, and normalizes symbols.
 
     Ported from bot_fixed (v6) lines 2922-2929.
     """
@@ -28,8 +28,18 @@ def _preprocess_signal_text(raw_text: str) -> str:
             continue
         raw_lines.append(raw_line)
 
+    processed = "\n".join(raw_lines)
+
+    # Remove markdown formatting
+    processed = re.sub(r"\*\*([^*]+)\*\*", r"\1", processed)  # **bold**
+    processed = re.sub(r"\*([^*]+)\*", r"\1", processed)  # *italic*
+    processed = re.sub(r"__([^_]+)__", r"\1", processed)  # __underline__
+    processed = re.sub(r"`([^`]+)`", r"\1", processed)  # `code`
+    processed = re.sub(r"~~([^~]+)~~", r"\1", processed)  # ~~strikethrough~~
+
     # Normalize symbols
-    processed = "\n".join(raw_lines).replace("·", "\u2022")
+    processed = processed.replace("·", "\u2022")
+
     return processed
 
 
