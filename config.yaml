@@ -9,12 +9,6 @@ discord:
       fixed_leverage: 5
       default_sl_percent: 0.5
       position_size_pct: 0.5
-      stale_signal_seconds: 120
-      max_price_deviation_pct: 2.0
-      move_to_breakeven_on_tp1: true
-      cancel_reentry_on_tp2: true
-      place_reentry_after_tp1: true
-      move_stop_to_tp1_on_tp3: true
       tp_distributions:
         3: # Для сигналов с 3 TP
           - label: tp1

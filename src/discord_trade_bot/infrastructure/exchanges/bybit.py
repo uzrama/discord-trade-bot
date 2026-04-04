@@ -308,7 +308,6 @@ class BybitFuturesAdapter(BaseExchangeAdapter):
 
                     if is_last_tp:
                         qty_str = "0"  # Special Bybit value: close entire position
-                        logger.info(f"📊 TP{idx + 1} (last) will close entire remaining position (qty=0)")
                     else:
                         # Use smart formatting based on symbol's qtyStep
                         qty_str = await self._format_quantity_for_symbol(symbol, tp_qty, reduce_only=True)

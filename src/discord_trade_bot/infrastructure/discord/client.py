@@ -43,7 +43,6 @@ class DiscordSelfAdapter(discord.Client):
     async def on_message(self, message: discord.Message):
         text = ""
         text = self._extract_full_text(message)
-
         source_id = self._channel_to_source_map.get(message.channel.id, str(message.channel.id))
         dto = ProcessSignalDTO(source_id=source_id, channel_id=str(message.channel.id), message_id=str(message.id), text=text)
 
