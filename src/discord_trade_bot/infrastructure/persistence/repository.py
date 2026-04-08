@@ -93,7 +93,10 @@ class SqliteStateRepository(StateRepositoryProtocol):
     @override
     async def get_open_positions(self) -> list[ActivePositionEntity]:
         async with aiosqlite.connect(self._db_file) as db:
-            async with db.execute("SELECT data FROM positions WHERE status = ?", (PositionStatus.OPEN.value,)) as cursor:
+            async with db.execute(
+                "SELECT data FROM positions WHERE status IN (?, ?)",
+                (PositionStatus.OPEN.value, PositionStatus.WAITING_UPDATE.value),
+            ) as cursor:
                 rows = await cursor.fetchall()
         return [pos for row in rows if (pos := self._deserialize_position(row))]
 

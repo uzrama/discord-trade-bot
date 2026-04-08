@@ -16,8 +16,9 @@ R = TypeVar("R")
 
 
 @final
-class BybitFuturesAdapter(BaseExchangeAdapter):
-    def __init__(self, api_key: str, api_secret: str, testnet: bool = False, demo: bool = False):
+class BybitAdapter(BaseExchangeAdapter):
+    def __init__(self, account_name: str, api_key: str, api_secret: str, testnet: bool = False, demo: bool = False):
+        self.account_name = account_name
         self.api_key = api_key
         self.api_secret = api_secret
         self.testnet = testnet  # Store testnet parameter for WebSocket
@@ -31,12 +32,6 @@ class BybitFuturesAdapter(BaseExchangeAdapter):
     @override
     def name(self) -> str:
         return "bybit"
-
-    @override
-    async def close(self):
-        if self._ws:
-            self._ws.exit()
-        self._stop_event.set()
 
     # Helper method to run synchronous pybit functions without blocking Event Loop
     async def _run_in_thread(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> Any:
@@ -233,7 +228,7 @@ class BybitFuturesAdapter(BaseExchangeAdapter):
             orderType="Market",
             qty=qty_str,
             triggerPrice=await self._format_price_for_symbol(symbol, stop_price),
-            triggerBy="MarkPrice",
+            triggerBy="LastPrice",
             triggerDirection=trigger_direction,
             reduceOnly=True,
             closeOnTrigger=True,
@@ -322,7 +317,7 @@ class BybitFuturesAdapter(BaseExchangeAdapter):
                         orderType="Market",
                         qty=qty_str,
                         triggerPrice=price_str,
-                        triggerBy="MarkPrice",
+                        triggerBy="LastPrice",
                         triggerDirection=trigger_direction,
                         reduceOnly=True,
                         closeOnTrigger=True,
@@ -359,8 +354,9 @@ class BybitFuturesAdapter(BaseExchangeAdapter):
                 logger.error(f"❌ Error handling Bybit order message: {e}")
 
         try:
-            logger.info(f"📡 Connecting to Bybit WebSocket (testnet={self.testnet}) via pybit...")
-            self._ws = WebSocket(testnet=False, demo=self.demo, channel_type="private", api_key=self.api_key, api_secret=self.api_secret)
+            balance = await self.get_balance()
+            logger.info(f"📡 Connecting to Bybit WebSocket (testnet={self.testnet}, demo={self.demo}, name={self.account_name}, balance={balance})")
+            self._ws = WebSocket(testnet=self.testnet, demo=self.demo, channel_type="private", api_key=self.api_key, api_secret=self.api_secret)
 
             # Subscribe to order events
             self._ws.order_stream(callback=handle_order_msg)
@@ -380,6 +376,7 @@ class BybitFuturesAdapter(BaseExchangeAdapter):
                 logger.error(f"❌ Bybit WebSocket error: {e}")
             raise
 
+    @override
     async def get_symbol_info(self, symbol: str) -> dict[str, Any]:
         resp = await self._run_in_thread(self.session.get_instruments_info, category="linear", symbol=symbol)
         rows = resp.get("result", {}).get("list", [])
@@ -407,6 +404,7 @@ class BybitFuturesAdapter(BaseExchangeAdapter):
             "max_order_qty": 1000000.0,
         }
 
+    @override
     async def get_order_status(self, symbol: str, order_id: str) -> dict[str, Any]:
         """Get order status from Bybit.
 
@@ -440,5 +438,8 @@ class BybitFuturesAdapter(BaseExchangeAdapter):
 
         return {"orderId": order_id, "orderStatus": "NOT_FOUND"}
 
-    async def close(self) -> None:
-        pass
+    @override
+    async def close(self):
+        if self._ws:
+            self._ws.exit()
+        self._stop_event.set()

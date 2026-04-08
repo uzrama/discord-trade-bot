@@ -19,9 +19,10 @@ def setup_logging(level: str | int = logging.INFO) -> None:
     level_styles["critical"] = {"color": "red", "bold": True, "background": "white"}
 
     coloredlogs.install(level=level, fmt=log_format, datefmt=date_format, field_styles=field_styles, level_styles=level_styles)
-
     # Suppress noisy loggers
     logging.getLogger("discord").setLevel(logging.WARNING)
+    logging.getLogger("pybit").setLevel(logging.WARNING)
+    logging.getLogger("websocket").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)

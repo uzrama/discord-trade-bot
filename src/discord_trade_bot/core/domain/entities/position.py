@@ -26,7 +26,7 @@ class ActivePositionEntity:
     entry_price: float
     opened_at: datetime = field(default_factory=_now_utc)
     stop_loss: float | None = None
-    is_default_sl: bool = False  # True if SL was set from default_sl_percent (not from signal)
+    is_default_sl: bool = False
     take_profits: list[float] = field(default_factory=list)
     tp_distribution: list[TPDistributionRow] = field(default_factory=list)
     tp_order_ids: dict[str, float] = field(default_factory=dict)

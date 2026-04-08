@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import final
@@ -41,7 +42,8 @@ class DiscordSelfAdapter(discord.Client):
             logger.info(f"  - {cid} ({name})")
 
     async def on_message(self, message: discord.Message):
-        text = ""
+        if message.channel.id not in self._watched_channel_ids:
+            return
         text = self._extract_full_text(message)
         source_id = self._channel_to_source_map.get(message.channel.id, str(message.channel.id))
         dto = ProcessSignalDTO(source_id=source_id, channel_id=str(message.channel.id), message_id=str(message.id), text=text)
@@ -71,13 +73,42 @@ class DiscordSelfAdapter(discord.Client):
         await self._on_message_callback(dto)
 
     def _extract_full_text(self, message: discord.Message) -> str:
-        """Extract full text from message including embeds."""
-        text = message.content or ""
+        """Extract full text from message including embeds and fields."""
+        parts = []
+
+        # 1. Add message content (contains symbol and side)
+        if message.content:
+            parts.append(message.content)
+
+        # 2. Process first embed only
         if message.embeds:
-            embed_text = message.embeds[0].description or ""
-            if embed_text:
-                text = f"{text}\n{embed_text}" if text else embed_text
-        return text
+            embed = message.embeds[0]
+
+            # Add description (contains signal type and leverage)
+            if embed.description:
+                parts.append(embed.description)
+
+            # 3. Extract and format fields (contains entry, TP, SL)
+            for field in embed.fields:
+                field_name = field.name or ""
+                field_value = field.value or ""
+
+                # Skip empty fields and separator fields
+                if not field_value.strip() or field_value.strip().startswith("━"):
+                    continue
+
+                # Skip fields we don't need (STATS, STATUS, TRADE NOW)
+                field_name_upper = field_name.upper()
+                if any(skip in field_name_upper for skip in ["STATS", "STATUS", "TRADE NOW"]):
+                    continue
+
+                # Add field name and value
+                # Format: "ENTRY\n$0.057620 Triggered"
+                parts.append(f"{field_name}\n{field_value}")
+
+        extracted_text = "\n".join(parts)
+        logger.debug(f"Extracted text from message {message.id}: {extracted_text}")
+        return extracted_text
 
     async def stop_client(self):
         await self.close()

@@ -16,7 +16,6 @@ class DiscordRunner:
 
     async def run(self):
         self._is_running = True
-        logger.info("Starting Discord Self Client...")
         try:
             await self._discord_client.start_client()
         except Exception as e:
@@ -24,4 +23,3 @@ class DiscordRunner:
 
     def stop(self):
         self._is_running = False
-        # The container will close the client via stop_client in provider

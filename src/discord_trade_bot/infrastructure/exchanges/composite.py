@@ -103,6 +103,7 @@ class CompositeExchangeGateway(ExchangeGatewayProtocol, ExchangeRegistryProtocol
     ) -> bool:
         return await self._get_default_exchange().wait_for_position_ready(symbol, side, timeout, check_interval)
 
+    @override
     async def close(self):
         for adapter in self._exchanges.values():
             await adapter.close()
@@ -120,11 +121,9 @@ class CompositeExchangeGateway(ExchangeGatewayProtocol, ExchangeRegistryProtocol
         async def safe_listen(name: str, adapter: ExchangeGatewayProtocol) -> None:
             """Wrapper to handle individual exchange stream errors gracefully."""
             try:
-                logger.info(f"📡 Starting WebSocket stream for {name}...")
                 await adapter.listen_user_stream(on_update_callback)
             except Exception as e:
                 logger.error(f"❌ WebSocket stream failed for {name}: {e}")
-                logger.info(f"🔄 {name} stream will not be restarted automatically")
 
         # Start all streams concurrently with error isolation
         tasks = [safe_listen(name, adapter) for name, adapter in self._exchanges.items()]

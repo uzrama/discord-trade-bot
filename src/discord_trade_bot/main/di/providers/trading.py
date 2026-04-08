@@ -10,7 +10,7 @@ from discord_trade_bot.core.application.signal.use_cases import ProcessSignalUse
 from discord_trade_bot.core.application.trading.interfaces import ExchangeGatewayProtocol, ExchangeRegistryProtocol
 from discord_trade_bot.core.application.trading.use_cases import OpenPositionUseCase, ProcessTrackerEventUseCase
 from discord_trade_bot.infrastructure.exchanges.binance import BinanceFuturesAdapter
-from discord_trade_bot.infrastructure.exchanges.bybit import BybitFuturesAdapter
+from discord_trade_bot.infrastructure.exchanges.bybit import BybitAdapter
 from discord_trade_bot.infrastructure.exchanges.composite import CompositeExchangeGateway
 from discord_trade_bot.main.config.app import AppConfig
 from discord_trade_bot.main.config.yaml.general import AppMode
@@ -24,42 +24,37 @@ class TradingProvider(Provider):
     async def get_exchange_composite(self, config: AppConfig) -> AsyncIterable[CompositeExchangeGateway]:
         exchanges = {}
 
-        # Binance
-        if config.binance.token and config.binance.secret_key:
-            binance_api_key = config.binance.token.get_secret_value()
-            binance_secret = config.binance.secret_key.get_secret_value()
+        # Binance accounts
+        for account in config.exchanges.binance_accounts:
+            api_key = account.token.get_secret_value()
+            secret = account.secret_key.get_secret_value()
 
-            if binance_api_key and binance_secret:
+            if api_key and secret:
                 binance_config = config.yaml.exchanges.get("binance")
-                binance_testnet = binance_config.testnet if binance_config and binance_config.testnet is not None else config.yaml.general.mode == AppMode.TESTNET
-                exchanges["binance"] = BinanceFuturesAdapter(binance_api_key, binance_secret, testnet=binance_testnet)
-                logger.info("✅ Binance exchange configured")
+                testnet = binance_config.testnet if binance_config and binance_config.testnet is not None else config.yaml.general.mode == AppMode.TESTNET
+                exchanges[account.name] = BinanceFuturesAdapter(api_key, secret, testnet=testnet)
             else:
-                logger.warning("⚠️ Binance API keys are empty, skipping Binance exchange")
-        else:
-            logger.warning("⚠️ Binance API keys not configured, skipping Binance exchange")
+                logger.warning(f"⚠️ Binance account '{account.name}' has empty credentials, skipping")
 
-        # Bybit
-        if config.bybit.token and config.bybit.secret_key:
-            bybit_api_key = config.bybit.token.get_secret_value()
-            bybit_secret = config.bybit.secret_key.get_secret_value()
+        # Bybit accounts
+        for account in config.exchanges.bybit_accounts:
+            api_key = account.token.get_secret_value()
+            secret = account.secret_key.get_secret_value()
 
-            if bybit_api_key and bybit_secret:
+            if api_key and secret:
                 bybit_config = config.yaml.exchanges.get("bybit")
-                bybit_testnet = bybit_config.testnet if bybit_config and bybit_config.testnet is not None else config.yaml.general.mode == AppMode.TESTNET
-                bybit_demo = bybit_config.demo if bybit_config and bybit_config.demo is not None else False
-                exchanges["bybit"] = BybitFuturesAdapter(bybit_api_key, bybit_secret, testnet=bybit_testnet, demo=bybit_demo)
-                logger.info("✅ Bybit exchange configured")
+                testnet = bybit_config.testnet if bybit_config and bybit_config.testnet is not None else config.yaml.general.mode == AppMode.TESTNET
+                demo = bybit_config.demo if bybit_config and bybit_config.demo is not None else False
+                exchanges[account.name] = BybitAdapter(account.name, api_key, secret, testnet=testnet, demo=demo)
+                logger.info(f"✅ Bybit account '{account.name}' configured")
             else:
-                logger.warning("⚠️ Bybit API keys are empty, skipping Bybit exchange")
-        else:
-            logger.warning("⚠️ Bybit API keys not configured, skipping Bybit exchange")
+                logger.warning(f"⚠️ Bybit account '{account.name}' has empty credentials, skipping")
 
         # Validate at least one exchange is configured
         if not exchanges:
-            raise RuntimeError("❌ No exchange adapters configured. Please provide API keys for at least one exchange (Binance or Bybit) in your .env file.")
+            raise RuntimeError("❌ No exchange adapters configured. Please provide API keys for at least one exchange account in your .env file.")
 
-        logger.info(f"📊 Active exchanges: {', '.join(exchanges.keys())}")
+        logger.info(f"📊 Active exchange accounts: {', '.join(exchanges.keys())}")
 
         composite = CompositeExchangeGateway(exchanges)
         yield composite

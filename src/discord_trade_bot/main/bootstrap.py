@@ -23,7 +23,6 @@ async def run_application(runner_type: type[TRunner], process_name: str) -> None
     3. Global error handling and graceful shutdown
     """
     setup_logging()
-    logger.info(f"🚀 Initializing: {process_name}...")
     container = setup_di()
     try:
         # Resolve the requested runner (Discord or Tracker) from the container

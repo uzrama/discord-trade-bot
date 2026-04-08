@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def setup_di() -> AsyncContainer:
-    logger.info("Initializing DI Container...")
+    logger.debug("Initializing DI Container...")
     _container = make_async_container(
         ConfigProvider(),
         DiscordProvider(),
