@@ -1,6 +1,4 @@
-import asyncio
 import logging
-import time
 from asyncio import Lock
 from collections import defaultdict
 from typing import Any, final
@@ -56,6 +54,7 @@ class ProcessTrackerEventUseCase:
         5. Check if the order is a TP or SL execution
         6. Update position state and move SL to breakeven if needed
         7. Close position if all TPs are hit or SL is triggered
+        8. Check pending entries for SL hit
 
         Args:
             event: WebSocket event dictionary containing order execution data.
@@ -69,7 +68,7 @@ class ProcessTrackerEventUseCase:
         symbol = order_info.get("s", "")
         status = order_info.get("X", "")
 
-        logger.debug(f"WebSocket event for {symbol}: order_id={order_id}, status={status}, event_type={event.get('e')}")
+        logger.info(f"WebSocket event for {symbol}: order_id={order_id}, status={status}, event_type={event.get('e')}")
 
         # Check if this is a pending entry fill
         if status == "FILLED":
@@ -78,6 +77,9 @@ class ProcessTrackerEventUseCase:
         # Check if this is a pending entry cancellation/expiration
         if status in {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}:
             await self._handle_pending_entry_cancellation(event)
+
+        # Check pending entries for SL hit (price monitoring)
+        await self._check_pending_entries_sl_hit(symbol)
 
         # Continue with existing logic for active positions
         # For conditional orders (TP/SL), Binance uses 'si' (algoId), otherwise 'i' (orderId)
@@ -164,6 +166,9 @@ class ProcessTrackerEventUseCase:
                     # Get exchange to cancel remaining TP orders
                     exchange = self._exchange_registry.get_exchange(position.exchange)
                     await self._cancel_remaining_tp_orders(position, exchange)
+
+                    # Cancel all orders for the symbol from exchange
+                    await self._cancel_all_orders_for_symbol_from_exchange(symbol, exchange)
 
                     position.status = PositionStatus.CLOSED
                     await self._state_repository.save_position(position)
@@ -451,6 +456,37 @@ class ProcessTrackerEventUseCase:
             logger.info(f"✅ Cancelled all remaining orders for {symbol} (fallback)")
         except Exception as e:
             logger.warning(f"⚠️ Failed to cancel all orders for {symbol}: {e}")
+
+    async def _cancel_all_orders_for_symbol_from_exchange(self, symbol: str, exchange: ExchangeGatewayProtocol) -> None:
+        """Cancel all open orders for symbol directly from exchange after SL trigger.
+
+        This method uses a direct exchange approach:
+        1. Cancel all orders for the symbol via exchange API
+        2. Clean up pending entry from database (if exists)
+
+        Args:
+            symbol: Trading pair symbol
+            exchange: Exchange gateway
+        """
+        logger.info(f"🗑️ [SL TRIGGER] Cancelling all orders for {symbol} from exchange")
+
+        # Step 1: Cancel all orders for the symbol
+        try:
+            await exchange.cancel_all_orders(symbol)
+            logger.info(f"✅ Cancelled all orders for {symbol}")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to cancel all orders for {symbol}: {e}")
+
+        # Step 2: Clean up pending entry from database (if exists)
+        try:
+            pending_entry = await self._state_repository.get_pending_entry_by_symbol(symbol)
+            if pending_entry:
+                await self._state_repository.delete_pending_entry(symbol)
+                logger.info(f"✅ Removed pending entry for {symbol} from database")
+            else:
+                logger.debug(f"No pending entry found in database for {symbol}")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to clean up pending entry for {symbol}: {e}")
 
     async def _close_position_market(self, position: ActivePositionEntity, exchange: ExchangeGatewayProtocol) -> None:
         """Close position with market order (emergency).
@@ -840,3 +876,92 @@ class ProcessTrackerEventUseCase:
         # Delete pending entry
         await self._state_repository.delete_pending_entry(symbol)
         logger.info(f"✅ Cancelled pending entry for {symbol} removed")
+
+    async def _check_pending_entries_sl_hit(self, symbol: str) -> None:
+        """Check if pending entries have their SL hit by current price.
+
+        This method monitors pending limit orders and cancels them if the current
+        market price touches the stop loss level before the limit order is filled.
+
+        Args:
+            symbol: Trading pair symbol to check
+        """
+        # Get pending entry for this symbol
+        pending_entry = await self._state_repository.get_pending_entry_by_symbol(symbol)
+
+        if not pending_entry:
+            return  # No pending entry for this symbol
+
+        # Skip if no stop loss defined
+        if not pending_entry.stop_loss:
+            return
+
+        # Get exchange adapter
+        exchange = self._exchange_registry.get_exchange(pending_entry.exchange)
+
+        # Get current market price
+        try:
+            current_price = await exchange.get_last_price(symbol)
+        except Exception as e:
+            logger.warning(f"⚠️ Could not get current price for {symbol} to check pending SL: {e}")
+            return
+
+        # Check if SL is hit based on side
+        sl_hit = False
+
+        if pending_entry.side == TradeSide.LONG:
+            # For LONG: SL hit if current price <= stop loss
+            if current_price <= pending_entry.stop_loss:
+                sl_hit = True
+                logger.warning(f"🛑 [PENDING SL HIT] LONG limit order for {symbol}: current price {current_price:.8f} <= SL {pending_entry.stop_loss:.8f}")
+        else:  # SHORT
+            # For SHORT: SL hit if current price >= stop loss
+            if current_price >= pending_entry.stop_loss:
+                sl_hit = True
+                logger.warning(f"🛑 [PENDING SL HIT] SHORT limit order for {symbol}: current price {current_price:.8f} >= SL {pending_entry.stop_loss:.8f}")
+
+        if not sl_hit:
+            return  # SL not hit, nothing to do
+
+        # SL is hit - cancel limit order and protective orders
+        logger.info(f"🚫 Cancelling pending limit order for {symbol} due to SL hit")
+
+        # Cancel the limit order
+        try:
+            await exchange.cancel_order(symbol, pending_entry.order_id)
+            logger.info(f"✅ Cancelled limit order {pending_entry.order_id} for {symbol}")
+        except Exception as e:
+            logger.error(f"⚠️ Failed to cancel limit order {pending_entry.order_id} for {symbol}: {e}")
+
+        # Cancel protective SL order if exists
+        if pending_entry.sl_order_id:
+            try:
+                await exchange.cancel_order(symbol, pending_entry.sl_order_id)
+                logger.info(f"✅ Cancelled protective SL order {pending_entry.sl_order_id} for {symbol}")
+            except Exception as e:
+                logger.error(f"⚠️ Failed to cancel protective SL for {symbol}: {e}")
+
+        # Cancel all protective TP orders
+        if pending_entry.tp_order_ids:
+            for i, tp_order_id in enumerate(pending_entry.tp_order_ids, start=1):
+                try:
+                    await exchange.cancel_order(symbol, tp_order_id)
+                    logger.info(f"✅ Cancelled protective TP{i} order {tp_order_id} for {symbol}")
+                except Exception as e:
+                    logger.error(f"⚠️ Failed to cancel protective TP{i} for {symbol}: {e}")
+
+        # Send notification
+        side_str = "LONG" if pending_entry.side == TradeSide.LONG else "SHORT"
+        message = (
+            f"🛑 **{symbol}**: Limit order cancelled - SL hit before entry!\n"
+            f"Side: {side_str}\n"
+            f"Entry Price: {pending_entry.entry_price:.8f}\n"
+            f"Stop Loss: {pending_entry.stop_loss:.8f}\n"
+            f"Current Price: {current_price:.8f}\n"
+            f"Reason: Price touched SL level before limit order filled"
+        )
+        await self._notification_gateway.send_message(message)
+
+        # Delete pending entry from database
+        await self._state_repository.delete_pending_entry(symbol)
+        logger.info(f"✅ Pending entry for {symbol} removed due to SL hit")

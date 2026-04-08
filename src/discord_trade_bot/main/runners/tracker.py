@@ -31,11 +31,12 @@ class PositionTrackerRunner:
 
     async def _on_ws_update(self, event: dict[str, Any]):
         # Filter only necessary events
+
         if event.get("e") != "ORDER_TRADE_UPDATE":
             return
         order_info = event.get("o", {})
         status = order_info.get("X", "")
-        # React only to FILLED orders
-        if status == "FILLED":
+
+        if status in ["FILLED", "Rejected"]:
             logger.info("📡 [WS] FILLED event captured, sending to Taskiq...")
             await process_tracker_event_task.kiq(event)
