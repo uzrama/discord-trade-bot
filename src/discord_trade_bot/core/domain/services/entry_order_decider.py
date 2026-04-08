@@ -40,10 +40,12 @@ def decide_entry_order(
     market_price: float,
     side: TradeSide,
     stop_loss: float | None = None,
+    take_profits: list[float] | None = None,
 ) -> EntryOrderDecision:
     """Decide whether to use market or limit order for entry.
 
     Logic:
+    - Validates price is within SL-TP1 range (if TP1 exists)
     - LONG: if market_price <= entry_price → check SL, then market or skip
     - SHORT: if market_price >= entry_price → check SL, then market or skip
     - If stop_loss exists and already hit → skip entry
@@ -57,6 +59,7 @@ def decide_entry_order(
         market_price: Current market price
         side: Trade side (LONG or SHORT)
         stop_loss: Stop loss price from signal (optional)
+        take_profits: List of take profit prices from signal (optional)
 
     Returns:
         EntryOrderDecision with order type, limit price, and reason
@@ -88,6 +91,43 @@ def decide_entry_order(
             limit_price=None,
             reason="invalid_market_price",
         )
+
+    # Validate price is within SL-TP1 range
+    if take_profits and len(take_profits) > 0:
+        tp1 = take_profits[0]
+
+        if side == TradeSide.LONG:
+            # For LONG: price should be between SL and TP1
+            # Block if price >= TP1 (already at or beyond first take profit)
+            if market_price >= tp1:
+                return EntryOrderDecision(
+                    order_type=OrderType.SKIP,
+                    limit_price=None,
+                    reason=f"price_beyond_tp1 (TP1: {tp1:.2f}, Market: {market_price:.2f})",
+                )
+            # Block if price <= SL (already at or beyond stop loss)
+            if stop_loss is not None and market_price <= stop_loss:
+                return EntryOrderDecision(
+                    order_type=OrderType.SKIP,
+                    limit_price=None,
+                    reason=f"price_below_stop_loss (SL: {stop_loss:.2f}, Market: {market_price:.2f})",
+                )
+        else:  # SHORT
+            # For SHORT: price should be between TP1 and SL
+            # Block if price <= TP1 (already at or beyond first take profit)
+            if market_price <= tp1:
+                return EntryOrderDecision(
+                    order_type=OrderType.SKIP,
+                    limit_price=None,
+                    reason=f"price_beyond_tp1 (TP1: {tp1:.2f}, Market: {market_price:.2f})",
+                )
+            # Block if price >= SL (already at or beyond stop loss)
+            if stop_loss is not None and market_price >= stop_loss:
+                return EntryOrderDecision(
+                    order_type=OrderType.SKIP,
+                    limit_price=None,
+                    reason=f"price_above_stop_loss (SL: {stop_loss:.2f}, Market: {market_price:.2f})",
+                )
     # Handle CMP mode
     if entry_mode == EntryMode.CMP:
         # CMP with reference price

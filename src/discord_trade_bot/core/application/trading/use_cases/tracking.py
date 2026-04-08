@@ -146,9 +146,15 @@ class ProcessTrackerEventUseCase:
                         await self._move_sl_to_breakeven(position)
 
                     position.tp_index_hit += 1
+
+                    # Check if position is closed first
                     if position.tp_index_hit >= len(position.take_profits):
                         logger.info(f"DONE [USE CASE] All TPs for {symbol} reached. Position closed.")
                         position.status = PositionStatus.CLOSED
+                    # Move SL to TP1 after third TP is hit (only if more TPs remain)
+                    elif position.tp_index_hit == 3 and len(position.take_profits) > 3:
+                        await self._move_sl_to_tp1(position)
+
                     await self._state_repository.save_position(position)
                     break
                 # Check for Stop Loss execution
@@ -190,10 +196,10 @@ class ProcessTrackerEventUseCase:
         return 0.0
 
     async def _move_sl_to_breakeven(self, position: ActivePositionEntity) -> BreakevenMoveResult:
-        """Move SL to breakeven with fallback strategies.
+        """Move SL to breakeven (entry price) with fallback strategies.
 
         This method implements a three-tier strategy:
-        1. Try calculated breakeven price (accounting for fees and PnL)
+        1. Try entry price adjusted for fees (true breakeven)
         2. Fallback: Try default_sl_percent from current price
         3. Emergency: Close entire position with market order
 
@@ -239,34 +245,29 @@ class ProcessTrackerEventUseCase:
             return BreakevenMoveResult.POSITION_ALREADY_CLOSED
 
         # ============================================================
-        # ATTEMPT 1: SL at TP1 level (with fee adjustment)
+        # ATTEMPT 1: SL at entry price (breakeven with fee adjustment)
         # ============================================================
 
-        be_price = self._calculate_tp1_based_sl(position)
+        be_price = self._calculate_entry_based_sl(position)
 
-        if be_price:
-            tp1_price = position.take_profits[0] if position.take_profits else 0.0
-            logger.info(
-                f"🛡️ [USE CASE] Moving Stop Loss to TP1 level for {symbol}...\n"
-                f"  Entry: {position.entry_price:.8f}\n"
-                f"  TP1: {tp1_price:.8f}\n"
-                f"  SL (TP1 - fees): {be_price:.8f}\n"
-                f"  Current price: {current_price:.8f}\n"
-                f"  Remaining qty: {position.remaining_qty:.2f}\n"
-                f"  Realized PnL: {position.realized_pnl_usdt:.2f} USDT"
-            )
+        logger.info(
+            f"🛡️ [USE CASE] Moving Stop Loss to entry price (breakeven) for {symbol}...\n"
+            f"  Entry: {position.entry_price:.8f}\n"
+            f"  SL (Entry + fees): {be_price:.8f}\n"
+            f"  Current price: {current_price:.8f}\n"
+            f"  Remaining qty: {position.remaining_qty:.2f}\n"
+            f"  Realized PnL: {position.realized_pnl_usdt:.2f} USDT"
+        )
 
-            # Check if distance is valid
-            if self._is_sl_distance_valid(be_price, current_price, position.side):
-                if await self._try_move_sl(position, exchange, be_price, "tp1_level"):
-                    msg = f"🛡️ **{symbol}**: Stop loss moved to TP1 level!\n  TP1: {tp1_price:.8f}\n  SL: {be_price:.8f}\n  Remaining: {position.remaining_qty:.2f}"
-                    logger.info(msg)
-                    await self._notification_gateway.send_message(msg)
-                    return BreakevenMoveResult.SUCCESS
-            else:
-                logger.warning(f"⚠️ TP1-based SL {be_price:.8f} too close to market {current_price:.8f}, trying fallback...")
+        # Check if distance is valid
+        if self._is_sl_distance_valid(be_price, current_price, position.side):
+            if await self._try_move_sl(position, exchange, be_price, "entry_breakeven"):
+                msg = f"🛡️ **{symbol}**: Stop loss moved to breakeven (entry price)!\n  Entry: {position.entry_price:.8f}\n  SL: {be_price:.8f}\n  Remaining: {position.remaining_qty:.2f}"
+                logger.info(msg)
+                await self._notification_gateway.send_message(msg)
+                return BreakevenMoveResult.SUCCESS
         else:
-            logger.warning(f"⚠️ Cannot calculate TP1-based SL for {symbol}, trying fallback...")
+            logger.warning(f"⚠️ Entry-based SL {be_price:.8f} too close to market {current_price:.8f}, trying fallback...")
 
         # ============================================================
         # ATTEMPT 2: Fallback to default_sl_percent from current price
@@ -507,20 +508,52 @@ class ProcessTrackerEventUseCase:
         """
         return round(price, precision)
 
-    def _calculate_tp1_based_sl(self, position: ActivePositionEntity) -> float | None:
-        """Calculate SL price at TP1 level accounting for fees.
+    def _calculate_entry_based_sl(self, position: ActivePositionEntity) -> float:
+        """Calculate SL price at entry level accounting for fees.
 
-        This places the stop loss at the TP1 level, adjusted for fees to ensure
-        that if the SL is hit, the overall trade still breaks even or makes a small profit.
+        This places the stop loss at the entry price, adjusted for fees to ensure
+        that if the SL is hit, the overall trade breaks even (accounting for fees).
 
         Args:
             position: Active position entity
 
         Returns:
-            SL price at TP1 level, or None if calculation not possible
+            SL price at entry level (adjusted for fees)
         """
-        if not position.take_profits or len(position.take_profits) == 0:
-            return None
+        entry_price = position.entry_price
+        fee_rate = self._config.fees.get_break_even_fee_rate()
+
+        # Calculate fees for closing remaining position at entry level
+        remaining_notional = position.remaining_qty * entry_price
+        fees_for_close = remaining_notional * fee_rate
+
+        # Adjust SL from entry to account for fees
+        fee_per_unit = fees_for_close / position.remaining_qty
+
+        if position.side == TradeSide.LONG:
+            # For LONG: SL slightly above entry to cover fees
+            return entry_price + fee_per_unit
+        else:  # SHORT
+            # For SHORT: SL slightly below entry to cover fees
+            return entry_price - fee_per_unit
+
+    async def _move_sl_to_tp1(self, position: ActivePositionEntity) -> None:
+        """Move SL to TP1 level after TP3 is hit.
+
+        This method moves the stop loss to the TP1 level (adjusted for fees)
+        after the third take profit has been executed, locking in more profit.
+
+        Args:
+            position: Active position entity
+        """
+        symbol = position.symbol
+        exchange_name = position.exchange
+        exchange = self._exchange_registry.get_exchange(exchange_name)
+
+        # Check if TP1 exists
+        if not position.take_profits or len(position.take_profits) < 1:
+            logger.warning(f"⚠️ Cannot move SL to TP1 for {symbol}: no TP1 defined")
+            return
 
         tp1_price = position.take_profits[0]
         fee_rate = self._config.fees.get_break_even_fee_rate()
@@ -528,16 +561,41 @@ class ProcessTrackerEventUseCase:
         # Calculate fees for closing remaining position at TP1 level
         remaining_notional = position.remaining_qty * tp1_price
         fees_for_close = remaining_notional * fee_rate
-
-        # Adjust SL from TP1 to account for fees
         fee_per_unit = fees_for_close / position.remaining_qty
 
+        # Adjust SL from TP1 to account for fees
         if position.side == TradeSide.LONG:
             # For LONG: SL slightly below TP1 to cover fees
-            return tp1_price - fee_per_unit
+            sl_price = tp1_price - fee_per_unit
         else:  # SHORT
             # For SHORT: SL slightly above TP1 to cover fees
-            return tp1_price + fee_per_unit
+            sl_price = tp1_price + fee_per_unit
+
+        # Get current market price for validation
+        try:
+            current_price = await exchange.get_last_price(symbol)
+        except Exception as e:
+            logger.error(f"Could not get current price for {symbol}: {e}")
+            return
+
+        logger.info(
+            f"🛡️ [USE CASE] Moving Stop Loss to TP1 level after TP3 for {symbol}...\n"
+            f"  TP1: {tp1_price:.8f}\n"
+            f"  SL (TP1 - fees): {sl_price:.8f}\n"
+            f"  Current price: {current_price:.8f}\n"
+            f"  Remaining qty: {position.remaining_qty:.2f}"
+        )
+
+        # Check if distance is valid
+        if self._is_sl_distance_valid(sl_price, current_price, position.side):
+            if await self._try_move_sl(position, exchange, sl_price, "tp1_after_tp3"):
+                msg = f"🛡️ **{symbol}**: Stop loss moved to TP1 level (after TP3)!\n  TP1: {tp1_price:.8f}\n  SL: {sl_price:.8f}\n  Remaining: {position.remaining_qty:.2f}"
+                logger.info(msg)
+                await self._notification_gateway.send_message(msg)
+            else:
+                logger.warning(f"⚠️ Failed to move SL to TP1 for {symbol} after TP3")
+        else:
+            logger.warning(f"⚠️ TP1-based SL {sl_price:.8f} too close to market {current_price:.8f} after TP3 for {symbol}, keeping current SL")
 
     def _get_source_config(self, source_id: str):
         """Get source configuration by source_id.

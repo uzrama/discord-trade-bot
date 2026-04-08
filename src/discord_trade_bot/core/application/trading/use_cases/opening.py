@@ -66,15 +66,20 @@ class OpenPositionUseCase:
             market_price=market_price,
             side=side,
             stop_loss=sig.stop_loss,
+            take_profits=sig.take_profits,
         )
 
         if decision.order_type == OrderType.SKIP:
             error_msg = f"Entry skipped: {decision.reason}"
             logger.warning(f"⚠️ {symbol}: {error_msg}")
 
-            # Send notification if stop loss already hit
+            # Send notification for various skip reasons
             if "stop_loss_already_hit" in decision.reason:
                 await self._notification_gateway.send_message(f"⚠️ Signal skipped for {symbol}\nReason: Stop loss already hit\n{decision.reason}")
+            elif "price_beyond_tp1" in decision.reason:
+                await self._notification_gateway.send_message(f"⚠️ Signal skipped for {symbol}\nReason: Price already beyond TP1\n{decision.reason}")
+            elif "price_below_stop_loss" in decision.reason or "price_above_stop_loss" in decision.reason:
+                await self._notification_gateway.send_message(f"⚠️ Signal skipped for {symbol}\nReason: Price already beyond stop loss\n{decision.reason}")
 
             return OpenPositionResultDTO(success=False, reason=error_msg)
 
