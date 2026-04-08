@@ -39,7 +39,8 @@ def _preprocess_signal_text(raw_text: str) -> str:
     processed = re.sub(r"\*\*([^*]+)\*\*", r"\1", processed)  # **bold**
     processed = re.sub(r"\*([^*]+)\*", r"\1", processed)  # *italic*
     processed = re.sub(r"__([^_]+)__", r"\1", processed)  # __underline__
-    processed = re.sub(r"`([^`]+)`", r"\1", processed)  # `code`
+    # Закомментировано - backticks нужны для парсинга TP
+    # processed = re.sub(r"`([^`]+)`", r"\1", processed)  # `code`
     processed = re.sub(r"~~([^~]+)~~", r"\1", processed)  # ~~strikethrough~~
 
     # Normalize symbols
@@ -435,7 +436,7 @@ class SignalParserService:
         # and extract all numbers from lines until the next section
         section_match = re.search(
             r"(?:TAKE\s*PROFIT\s*TARGETS?|PROFIT\s*TARGETS?|TARGETS?|TPS?)\s*[:\-]?\s*(.+?)"
-            r"(?:\n\s*(?:SL|STOP\s*LOSS|ENTRY|LEVERAGE|TRADE\s*NOW|BYBIT|MEXC|BLOFIN|BITGET|"
+            r"(?:\n[^\n]*?(?:SL|STOP\s*LOSS|ENTRY|LEVERAGE|TRADE\s*NOW|BYBIT|MEXC|BLOFIN|BITGET|"
             r"ACTIVE\s*TRADE|BREAKEVEN|DCA(?:\s*LEVELS?)?|NOTES?|CALLER|CURRENT|P&L|"
             r"FINAL\s*PRICE|CLOSED|STATUS)\b|$)",
             text_up,
@@ -452,7 +453,7 @@ class SignalParserService:
                 # Skip service lines and lines with SL
                 if re.search(
                     r"\b(?:SL|STOP\s*LOSS|LEVERAGE|TRADE\s*NOW|BYBIT|MEXC|BLOFIN|BITGET|AO\s*TRADING|"
-                    r"WIN\s*TOGETHER|DCA(?:\s*LEVELS?)?|NOTES?|CALLER|CURRENT|P&L|"
+                    r"WIN\s*TOGETHER|DCA(?:\s*LEVELS?)?|BREAKEVEN|NOTES?|CALLER|CURRENT|P&L|"
                     r"FINAL\s*PRICE|CLOSED)\b",
                     line,
                     re.IGNORECASE,
@@ -460,19 +461,12 @@ class SignalParserService:
                     continue
 
                 # Extract numbers from the line
-                # Priority 1: Extract numbers in backticks (e.g., `100`, `$0.012300`)
+                # Extract only numbers in backticks (e.g., `100`, `$0.012300`)
                 # This ignores percentages in parentheses like (+25.00%)
                 nums_in_backticks = re.findall(r"`\$?([0-9]+(?:\.[0-9]+)?)`", line)
                 if nums_in_backticks:
                     # Use only numbers in backticks
                     tp_matches.append(nums_in_backticks[-1])
-                else:
-                    # Fallback: extract any number (old behavior for backward compatibility)
-                    # But skip lines with percentages in parentheses
-                    if not re.search(r"\([+\-]?[0-9]+(?:\.[0-9]+)?%\)", line):
-                        nums = re.findall(r"\$?([0-9]+(?:\.[0-9]+)?)", line)
-                        if nums:
-                            tp_matches.append(nums[-1])  # Take the last number in the line
 
         # 3) Fallback: line-by-line extraction after TP header
         if len(tp_matches) < 3 and re.search(r"\b(?:TAKE\s*PROFIT\s*TARGETS?|PROFIT\s*TARGETS?|TPS?)\b", text_up):
@@ -501,7 +495,7 @@ class SignalParserService:
                     continue
 
                 # Extract numbers from the line
-                # Priority 1: Extract numbers in backticks (e.g., `100`, `$0.012300`)
+                # Extract only numbers in backticks (e.g., `100`, `$0.012300`)
                 # This ignores percentages in parentheses like (+25.00%)
                 nums_in_backticks = re.findall(r"`\$?([0-9]+(?:\.[0-9]+)?)`", line)
                 if nums_in_backticks:
@@ -510,15 +504,6 @@ class SignalParserService:
                         tp_matches.append(nums_in_backticks[0])
                     elif len(nums_in_backticks) > 1:
                         tp_matches.append(nums_in_backticks[-1])
-                else:
-                    # Fallback: extract any number (old behavior for backward compatibility)
-                    # But skip lines with percentages in parentheses
-                    if not re.search(r"\([+\-]?[0-9]+(?:\.[0-9]+)?%\)", line):
-                        nums = re.findall(r"\$?([0-9]+(?:\.[0-9]+)?)", line)
-                        if len(nums) == 1:
-                            tp_matches.append(nums[0])
-                        elif len(nums) > 1:
-                            tp_matches.append(nums[-1])
 
         # Deduplication and saving
         sig.take_profits = dedupe_float_levels([v for v in (safe_float(m) for m in tp_matches) if v is not None])
