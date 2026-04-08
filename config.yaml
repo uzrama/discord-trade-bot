@@ -4,11 +4,166 @@ discord:
   watch_sources:
     - source_id: discord_source_1
       enabled: true
-      channel_id: 1483388521925578785 # Replace with your Discord channel ID
-      exchange: bybit
+      channel_id: 1385240143639871498 # Replace with your Discord channel ID
+      exchanges:
+        - name: l
+          position_size_pct: 40
+        # - name: mark
+        #   position_size_pct: 10
       fixed_leverage: 5
-      default_sl_percent: 0.5
-      position_size_pct: 0.5
+      default_sl_percent: 3.2
+      tp_distributions:
+        3: # Для сигналов с 3 TP
+          - label: tp1
+            close_pct: 50
+          - label: tp2
+            close_pct: 30
+          - label: tp3
+            close_pct: 20
+        4: # Для сигналов с 4 TP
+          - label: tp1
+            close_pct: 40
+          - label: tp2
+            close_pct: 30
+          - label: tp3
+            close_pct: 20
+          - label: tp4
+            close_pct: 10
+        5: # Для сигналов с 5 TP
+          - label: tp1
+            close_pct: 30
+          - label: tp2
+            close_pct: 25
+          - label: tp3
+            close_pct: 20
+          - label: tp4
+            close_pct: 15
+          - label: tp5
+            close_pct: 10
+    - source_id: discord_source_2
+      enabled: true
+      channel_id: 1466372612040036424 # Replace with your Discord channel ID
+      exchanges:
+        - name: l
+          position_size_pct: 40
+        - name: mark
+          position_size_pct: 10
+      fixed_leverage: 5
+      default_sl_percent: 7
+      tp_distributions:
+        3: # Для сигналов с 3 TP
+          - label: tp1
+            close_pct: 50
+          - label: tp2
+            close_pct: 30
+          - label: tp3
+            close_pct: 20
+        4: # Для сигналов с 4 TP
+          - label: tp1
+            close_pct: 40
+          - label: tp2
+            close_pct: 30
+          - label: tp3
+            close_pct: 20
+          - label: tp4
+            close_pct: 10
+        5: # Для сигналов с 5 TP
+          - label: tp1
+            close_pct: 30
+          - label: tp2
+            close_pct: 25
+          - label: tp3
+            close_pct: 20
+          - label: tp4
+            close_pct: 15
+          - label: tp5
+            close_pct: 10
+    - source_id: discord_source_3
+      enabled: true
+      channel_id: 1380287984133472387 # Replace with your Discord channel ID
+      exchanges:
+        - name: l2
+          position_size_pct: 40
+        - name: mark
+          position_size_pct: 10
+      fixed_leverage: 5
+      default_sl_percent: 7
+      tp_distributions:
+        3: # Для сигналов с 3 TP
+          - label: tp1
+            close_pct: 50
+          - label: tp2
+            close_pct: 30
+          - label: tp3
+            close_pct: 20
+        4: # Для сигналов с 4 TP
+          - label: tp1
+            close_pct: 40
+          - label: tp2
+            close_pct: 30
+          - label: tp3
+            close_pct: 20
+          - label: tp4
+            close_pct: 10
+        5: # Для сигналов с 5 TP
+          - label: tp1
+            close_pct: 30
+          - label: tp2
+            close_pct: 25
+          - label: tp3
+            close_pct: 20
+          - label: tp4
+            close_pct: 15
+          - label: tp5
+            close_pct: 10
+    - source_id: discord_source_4
+      enabled: true
+      channel_id: 1445368953965645824 # Replace with your Discord channel ID
+      exchanges:
+        - name: l3
+          position_size_pct: 40
+        - name: mark
+          position_size_pct: 10
+      fixed_leverage: 5
+      default_sl_percent: 6
+      tp_distributions:
+        3: # Для сигналов с 3 TP
+          - label: tp1
+            close_pct: 50
+          - label: tp2
+            close_pct: 30
+          - label: tp3
+            close_pct: 20
+        4: # Для сигналов с 4 TP
+          - label: tp1
+            close_pct: 40
+          - label: tp2
+            close_pct: 30
+          - label: tp3
+            close_pct: 20
+          - label: tp4
+            close_pct: 10
+        5: # Для сигналов с 5 TP
+          - label: tp1
+            close_pct: 30
+          - label: tp2
+            close_pct: 25
+          - label: tp3
+            close_pct: 20
+          - label: tp4
+            close_pct: 15
+          - label: tp5
+            close_pct: 10
+    - source_id: discord_source_5
+      enabled: true
+      channel_id: 1380287683326378175 # Replace with your Discord channel ID
+      exchanges:
+        - name: l4
+          position_size_pct: 40
+        - name: mark
+          position_size_pct: 10
+      fixed_leverage: 5
+      default_sl_percent: 6
       tp_distributions:
         3: # Для сигналов с 3 TP
           - label: tp1
@@ -41,7 +196,7 @@ exchanges:
   binance:
     timeout_seconds: 15
   bybit:
-    demo: true
+    demo: false
     timeout_seconds: 15
 fees:
   maker: 0.0002

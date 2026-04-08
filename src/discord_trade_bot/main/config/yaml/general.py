@@ -1,4 +1,4 @@
-from enum import Enum
+from enum import StrEnum
 from typing import ClassVar, override
 
 from pydantic import BaseModel
@@ -10,7 +10,7 @@ from discord_trade_bot.main.config.yaml.state import StateYamlConfig
 from discord_trade_bot.main.config.yaml.telegram import TelegramYamlConfig
 
 
-class AppMode(str, Enum):
+class AppMode(StrEnum):
     """Application operating mode.
 
     Attributes:
