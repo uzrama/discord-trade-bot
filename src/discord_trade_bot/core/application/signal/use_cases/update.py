@@ -268,49 +268,78 @@ class HandleSignalUpdateUseCase:
         # Update message hash
         target_position.message_hash = sig.message_hash
 
-        # Rebuild position risk orders (cancel old SL/TP and place new ones)
+        # Update position risk orders separately (only update what changed)
         # Use the exchange from the position itself (not from source_cfg)
         exchange = self._exchange_registry.get_exchange(target_position.exchange)
 
         try:
-            # Prepare keep_order_ids (entry order should be kept if it exists)
-            keep_order_ids = set()
-            if target_position.order_id:
-                keep_order_ids.add(str(target_position.order_id))
+            # Update SL if it changed
+            if got_new_stop:
+                # Cancel old SL order if exists
+                if target_position.sl_order_id:
+                    try:
+                        await exchange.cancel_order(sig.symbol, target_position.sl_order_id)
+                        logger.info(f"Cancelled old SL order {target_position.sl_order_id} for {sig.symbol}")
+                    except Exception as e:
+                        logger.warning(f"Failed to cancel old SL order for {sig.symbol}: {e}")
 
-            # Rebuild risk orders (cancel old SL/TP, place new ones)
-            sl_tp_res = await self._rebuild_position_risk_orders(
-                exchange=exchange,
-                symbol=sig.symbol,
-                side=target_position.side,
-                stop_loss=target_position.stop_loss,
-                take_profits=target_position.take_profits,
-                qty=target_position.remaining_qty or target_position.qty,
-                tp_distribution={len(target_position.take_profits): [{"label": tp.label, "close_pct": tp.close_pct} for tp in target_position.tp_distribution]}
-                if target_position.tp_distribution
-                else {},
-                keep_order_ids=keep_order_ids,
-            )
+                # Place new SL order if SL is set
+                if target_position.stop_loss:
+                    try:
+                        sl_order = await exchange.place_stop_market_order(sig.symbol, target_position.side, target_position.stop_loss)
+                        target_position.sl_order_id = str(sl_order.get("orderId") or sl_order.get("algoId") or "")
+                        logger.info(f"✅ Placed new SL order for {sig.symbol} at {target_position.stop_loss}")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to place new SL order for {sig.symbol}: {e}")
+                        await self._notification_gateway.send_message(f"⚠️ Failed to place new SL for {sig.symbol}: {e}")
+                        return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Failed to place SL: {e}")
 
-            # Update order IDs
-            sl_order = sl_tp_res.get("stop_loss")
-            if sl_order:
-                target_position.sl_order_id = str(sl_order.get("algoId") or sl_order.get("orderId") or "")
+            # Update TPs if they changed
+            if got_new_tps:
+                # Cancel all old TP orders
+                for tp_order_id in list(target_position.tp_order_ids.keys()):
+                    try:
+                        await exchange.cancel_order(sig.symbol, tp_order_id)
+                        logger.info(f"Cancelled old TP order {tp_order_id} for {sig.symbol}")
+                    except Exception as e:
+                        logger.warning(f"Failed to cancel old TP order {tp_order_id} for {sig.symbol}: {e}")
 
-            tp_order_ids = {}
-            for i, tp_order in enumerate(sl_tp_res.get("take_profits", [])):
-                order_id = tp_order.get("algoId") or tp_order.get("orderId")
-                if order_id and i < len(target_position.take_profits):
-                    tp_price = float(target_position.take_profits[i])
-                    tp_order_ids[str(order_id)] = tp_price
-            target_position.tp_order_ids = tp_order_ids
+                # Place new TP orders
+                tp_distribution_dict = {}
+                if target_position.tp_distribution:
+                    tp_distribution_dict = {len(target_position.take_profits): [{"label": tp.label, "close_pct": tp.close_pct} for tp in target_position.tp_distribution]}
 
-            logger.info(f"✅ Rebuilt SL/TP for {sig.symbol}: SL={target_position.stop_loss}, TPs={target_position.take_profits}")
+                try:
+                    tp_res = await exchange.place_sl_tp_orders(
+                        symbol=sig.symbol,
+                        side=target_position.side,
+                        stop_loss=None,  # Don't place SL here
+                        take_profits=target_position.take_profits,
+                        qty=target_position.remaining_qty or target_position.qty,
+                        tp_distribution=tp_distribution_dict,
+                    )
+
+                    # Update TP order IDs
+                    tp_order_ids = {}
+                    for i, tp_order in enumerate(tp_res.get("take_profits", [])):
+                        order_id = tp_order.get("algoId") or tp_order.get("orderId")
+                        if order_id and i < len(target_position.take_profits):
+                            tp_price = float(target_position.take_profits[i])
+                            tp_order_ids[str(order_id)] = tp_price
+                    target_position.tp_order_ids = tp_order_ids
+
+                    logger.info(f"✅ Placed {len(tp_order_ids)} new TP orders for {sig.symbol}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to place new TP orders for {sig.symbol}: {e}")
+                    await self._notification_gateway.send_message(f"⚠️ Failed to place new TPs for {sig.symbol}: {e}")
+                    return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Failed to place TPs: {e}")
+
+            logger.info(f"✅ Updated orders for {sig.symbol}: SL={target_position.stop_loss if got_new_stop else 'unchanged'}, TPs={'updated' if got_new_tps else 'unchanged'}")
 
         except Exception as e:
-            logger.error(f"❌ Failed to rebuild SL/TP for {sig.symbol}: {e}")
-            await self._notification_gateway.send_message(f"⚠️ Failed to rebuild SL/TP for {sig.symbol}: {e}")
-            return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Failed to rebuild SL/TP: {e}")
+            logger.error(f"❌ Unexpected error updating orders for {sig.symbol}: {e}")
+            await self._notification_gateway.send_message(f"⚠️ Failed to update orders for {sig.symbol}: {e}")
+            return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Failed to update orders: {e}")
 
         # Update status to OPEN only if it was WAITING_UPDATE
         if target_position.status == PositionStatus.WAITING_UPDATE:

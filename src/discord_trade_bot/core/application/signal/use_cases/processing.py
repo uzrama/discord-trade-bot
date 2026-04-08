@@ -198,7 +198,7 @@ class ProcessSignalUseCase:
                     tp_order_ids[str(order_id)] = tp_price
 
             # Determine if position needs to wait for signal updates
-            needs_signal_stop_update = sig.stop_loss is None and res.final_sl is None
+            needs_signal_stop_update = sig.stop_loss is None
             needs_signal_tp_update = not sig.take_profits
 
             position_status = PositionStatus.WAITING_UPDATE if (needs_signal_stop_update or needs_signal_tp_update) else PositionStatus.OPEN
