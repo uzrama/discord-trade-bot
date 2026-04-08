@@ -56,6 +56,10 @@ class CompositeExchangeGateway(ExchangeGatewayProtocol, ExchangeRegistryProtocol
         return await self._get_default_exchange().place_stop_market_order(symbol, side, stop_price, qty)
 
     @override
+    async def place_conditional_market_order(self, symbol: str, side: TradeSide, trigger_price: float, qty: float) -> dict[str, Any]:
+        return await self._get_default_exchange().place_conditional_market_order(symbol, side, trigger_price, qty)
+
+    @override
     async def cancel_order(self, symbol: str, order_id: str | int) -> dict[str, Any]:
         return await self._get_default_exchange().cancel_order(symbol, order_id)
 

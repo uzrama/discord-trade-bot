@@ -16,6 +16,7 @@ class OrderType(StrEnum):
 
     MARKET = "market"
     LIMIT = "limit"
+    CONDITIONAL_MARKET = "conditional_market"
     SKIP = "skip"
 
 
@@ -41,8 +42,9 @@ def decide_entry_order(
     side: TradeSide,
     stop_loss: float | None = None,
     take_profits: list[float] | None = None,
+    enter_on_trigger: bool = False,
 ) -> EntryOrderDecision:
-    """Decide whether to use market or limit order for entry.
+    """Decide whether to use market, limit, or conditional order for entry.
 
     Logic:
     - Validates price is within SL-TP1 range (if TP1 exists)
@@ -52,6 +54,8 @@ def decide_entry_order(
     - CMP with entry_price: applies same logic as above
     - CMP without entry_price: always market
     - No entry_mode or invalid: skip
+    - If enter_on_trigger=True → use CONDITIONAL_MARKET for pending entries
+    - If enter_on_trigger=False → use LIMIT for pending entries
 
     Args:
         entry_mode: Entry mode from signal (CMP or EXACT_PRICE)
@@ -60,13 +64,18 @@ def decide_entry_order(
         side: Trade side (LONG or SHORT)
         stop_loss: Stop loss price from signal (optional)
         take_profits: List of take profit prices from signal (optional)
+        enter_on_trigger: If True, use conditional orders; if False, use limit orders (default: False)
 
     Returns:
         EntryOrderDecision with order type, limit price, and reason
 
     Examples:
-        >>> # LONG, market above entry → limit
-        >>> decide_entry_order(EntryMode.EXACT_PRICE, 50000.0, 51000.0, TradeSide.LONG)
+        >>> # LONG, market above entry, with enter_on_trigger → conditional
+        >>> decide_entry_order(EntryMode.EXACT_PRICE, 50000.0, 51000.0, TradeSide.LONG, enter_on_trigger=True)
+        EntryOrderDecision(order_type=OrderType.CONDITIONAL_MARKET, limit_price=50000.0, reason='conditional_buy_above_entry')
+
+        >>> # LONG, market above entry, without enter_on_trigger → limit
+        >>> decide_entry_order(EntryMode.EXACT_PRICE, 50000.0, 51000.0, TradeSide.LONG, enter_on_trigger=False)
         EntryOrderDecision(order_type=OrderType.LIMIT, limit_price=50000.0, reason='buy_limit_above_entry')
 
         >>> # LONG, market below entry → market
@@ -134,42 +143,76 @@ def decide_entry_order(
         if entry_price is not None and entry_price > 0:
             if side == TradeSide.LONG:
                 if market_price <= entry_price:
-                    # Check if stop loss already hit
+                    # Price already at or below entry
                     if stop_loss is not None and market_price <= stop_loss:
                         return EntryOrderDecision(
                             order_type=OrderType.SKIP,
                             limit_price=None,
                             reason=f"stop_loss_already_hit (Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Market: {market_price:.2f})",
                         )
-                    return EntryOrderDecision(
-                        order_type=OrderType.MARKET,
-                        limit_price=None,
-                        reason="cmp_market_buy_below_or_equal_reference",
-                    )
-                return EntryOrderDecision(
-                    order_type=OrderType.LIMIT,
-                    limit_price=float(entry_price),
-                    reason="cmp_buy_limit_above_reference",
-                )
+                    # Check if enter_on_trigger flag is set
+                    if enter_on_trigger:
+                        return EntryOrderDecision(
+                            order_type=OrderType.CONDITIONAL_MARKET,
+                            limit_price=float(entry_price),
+                            reason="cmp_conditional_buy_at_or_below_reference",
+                        )
+                    else:
+                        return EntryOrderDecision(
+                            order_type=OrderType.MARKET,
+                            limit_price=None,
+                            reason="cmp_market_buy_below_or_equal_reference",
+                        )
+                else:
+                    # Price above entry - wait for price to fall to entry
+                    if enter_on_trigger:
+                        return EntryOrderDecision(
+                            order_type=OrderType.CONDITIONAL_MARKET,
+                            limit_price=float(entry_price),
+                            reason="cmp_conditional_buy_above_reference",
+                        )
+                    else:
+                        return EntryOrderDecision(
+                            order_type=OrderType.LIMIT,
+                            limit_price=float(entry_price),
+                            reason="cmp_limit_buy_above_reference",
+                        )
             else:  # SHORT
                 if market_price >= entry_price:
-                    # Check if stop loss already hit
+                    # Price at or above entry
                     if stop_loss is not None and market_price >= stop_loss:
                         return EntryOrderDecision(
                             order_type=OrderType.SKIP,
                             limit_price=None,
                             reason=f"stop_loss_already_hit (Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Market: {market_price:.2f})",
                         )
-                    return EntryOrderDecision(
-                        order_type=OrderType.MARKET,
-                        limit_price=None,
-                        reason="cmp_market_sell_above_or_equal_reference",
-                    )
-                return EntryOrderDecision(
-                    order_type=OrderType.LIMIT,
-                    limit_price=float(entry_price),
-                    reason="cmp_sell_limit_below_reference",
-                )
+                    # Check if enter_on_trigger flag is set
+                    if enter_on_trigger:
+                        return EntryOrderDecision(
+                            order_type=OrderType.CONDITIONAL_MARKET,
+                            limit_price=float(entry_price),
+                            reason="cmp_conditional_sell_at_or_above_reference",
+                        )
+                    else:
+                        return EntryOrderDecision(
+                            order_type=OrderType.MARKET,
+                            limit_price=None,
+                            reason="cmp_market_sell_at_or_above_reference",
+                        )
+                else:
+                    # Price below entry - wait for price to rise to entry
+                    if enter_on_trigger:
+                        return EntryOrderDecision(
+                            order_type=OrderType.CONDITIONAL_MARKET,
+                            limit_price=float(entry_price),
+                            reason="cmp_conditional_sell_below_reference",
+                        )
+                    else:
+                        return EntryOrderDecision(
+                            order_type=OrderType.LIMIT,
+                            limit_price=float(entry_price),
+                            reason="cmp_limit_sell_below_reference",
+                        )
 
         # CMP without reference price → always market
         return EntryOrderDecision(
@@ -189,42 +232,76 @@ def decide_entry_order(
 
         if side == TradeSide.LONG:
             if market_price <= entry_price:
-                # Check if stop loss already hit
+                # Price already at or below entry
                 if stop_loss is not None and market_price <= stop_loss:
                     return EntryOrderDecision(
                         order_type=OrderType.SKIP,
                         limit_price=None,
                         reason=f"stop_loss_already_hit (Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Market: {market_price:.2f})",
                     )
-                return EntryOrderDecision(
-                    order_type=OrderType.MARKET,
-                    limit_price=None,
-                    reason="market_buy_below_or_equal_entry",
-                )
-            return EntryOrderDecision(
-                order_type=OrderType.LIMIT,
-                limit_price=float(entry_price),
-                reason="buy_limit_above_entry",
-            )
+                # Check if enter_on_trigger flag is set
+                if enter_on_trigger:
+                    return EntryOrderDecision(
+                        order_type=OrderType.CONDITIONAL_MARKET,
+                        limit_price=float(entry_price),
+                        reason="conditional_buy_at_or_below_entry",
+                    )
+                else:
+                    return EntryOrderDecision(
+                        order_type=OrderType.MARKET,
+                        limit_price=None,
+                        reason="market_buy_below_or_equal_entry",
+                    )
+            else:
+                # Price above entry - wait for price to fall to entry
+                if enter_on_trigger:
+                    return EntryOrderDecision(
+                        order_type=OrderType.CONDITIONAL_MARKET,
+                        limit_price=float(entry_price),
+                        reason="conditional_buy_above_entry",
+                    )
+                else:
+                    return EntryOrderDecision(
+                        order_type=OrderType.LIMIT,
+                        limit_price=float(entry_price),
+                        reason="limit_buy_above_entry",
+                    )
         else:  # SHORT
             if market_price >= entry_price:
-                # Check if stop loss already hit
+                # Price at or above entry
                 if stop_loss is not None and market_price >= stop_loss:
                     return EntryOrderDecision(
                         order_type=OrderType.SKIP,
                         limit_price=None,
                         reason=f"stop_loss_already_hit (Entry: {entry_price:.2f}, SL: {stop_loss:.2f}, Market: {market_price:.2f})",
                     )
-                return EntryOrderDecision(
-                    order_type=OrderType.MARKET,
-                    limit_price=None,
-                    reason="market_sell_above_or_equal_entry",
-                )
-            return EntryOrderDecision(
-                order_type=OrderType.LIMIT,
-                limit_price=float(entry_price),
-                reason="sell_limit_below_entry",
-            )
+                # Check if enter_on_trigger flag is set
+                if enter_on_trigger:
+                    return EntryOrderDecision(
+                        order_type=OrderType.CONDITIONAL_MARKET,
+                        limit_price=float(entry_price),
+                        reason="conditional_sell_at_or_above_entry",
+                    )
+                else:
+                    return EntryOrderDecision(
+                        order_type=OrderType.MARKET,
+                        limit_price=None,
+                        reason="market_sell_at_or_above_entry",
+                    )
+            else:
+                # Price below entry - wait for price to rise to entry
+                if enter_on_trigger:
+                    return EntryOrderDecision(
+                        order_type=OrderType.CONDITIONAL_MARKET,
+                        limit_price=float(entry_price),
+                        reason="conditional_sell_below_entry",
+                    )
+                else:
+                    return EntryOrderDecision(
+                        order_type=OrderType.LIMIT,
+                        limit_price=float(entry_price),
+                        reason="limit_sell_below_entry",
+                    )
 
     # No valid entry mode
     return EntryOrderDecision(

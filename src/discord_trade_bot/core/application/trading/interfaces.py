@@ -56,6 +56,32 @@ class ExchangeGatewayProtocol(ABC):
         pass
 
     @abstractmethod
+    async def place_conditional_market_order(
+        self,
+        symbol: str,
+        side: TradeSide,
+        trigger_price: float,
+        qty: float,
+    ) -> dict[str, Any]:
+        """Place a conditional market order for entry.
+
+        This order triggers when price reaches trigger_price and opens a position.
+
+        For LONG: triggers when price rises to trigger_price (buy on breakout)
+        For SHORT: triggers when price falls to trigger_price (sell on breakdown)
+
+        Args:
+            symbol: Trading pair symbol
+            side: Position side (LONG or SHORT)
+            trigger_price: Price that triggers the order
+            qty: Order quantity
+
+        Returns:
+            Order response from exchange with orderId
+        """
+        pass
+
+    @abstractmethod
     async def cancel_order(self, symbol: str, order_id: str | int) -> dict[str, Any]:
         pass
 

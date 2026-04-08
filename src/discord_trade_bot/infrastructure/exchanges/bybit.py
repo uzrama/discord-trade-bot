@@ -237,6 +237,50 @@ class BybitAdapter(BaseExchangeAdapter):
         return {"orderId": resp["result"]["orderId"]}
 
     @override
+    async def place_conditional_market_order(
+        self,
+        symbol: str,
+        side: TradeSide,
+        trigger_price: float,
+        qty: float,
+    ) -> dict[str, Any]:
+        """Place conditional market order for entry on Bybit.
+
+        Uses triggerDirection to determine when order activates:
+        - LONG (Buy): triggerDirection=1 (rise) - triggers when price rises to trigger_price
+        - SHORT (Sell): triggerDirection=2 (fall) - triggers when price falls to trigger_price
+        """
+        order_side = "Buy" if side == TradeSide.LONG else "Sell"
+        # For entry orders:
+        # LONG: trigger when price rises (direction=1)
+        # SHORT: trigger when price falls (direction=2)
+        trigger_direction = 1 if side == TradeSide.LONG else 2
+
+        formatted_qty = await self._format_quantity_for_symbol(symbol, qty, reduce_only=False)
+        formatted_price = await self._format_price_for_symbol(symbol, trigger_price)
+
+        logger.info(f"[Bybit] Placing conditional market order: {symbol} {side.value} qty={formatted_qty} trigger={formatted_price} direction={trigger_direction}")
+
+        resp = await self._run_in_thread(
+            self.session.place_order,
+            category="linear",
+            symbol=symbol,
+            side=order_side,
+            orderType="Market",
+            qty=formatted_qty,
+            triggerPrice=formatted_price,
+            triggerBy="LastPrice",
+            triggerDirection=trigger_direction,
+            reduceOnly=False,
+            positionIdx=0,
+        )
+
+        order_id = resp["result"]["orderId"]
+        logger.info(f"[Bybit] Conditional market order placed: order_id={order_id}")
+
+        return {"orderId": order_id}
+
+    @override
     async def cancel_order(self, symbol: str, order_id: str | int) -> dict[str, Any]:
         return await self._run_in_thread(self.session.cancel_order, category="linear", symbol=symbol, orderId=str(order_id))
 
@@ -342,6 +386,8 @@ class BybitAdapter(BaseExchangeAdapter):
             try:
                 data = msg.get("data", [])
                 for order in data:
+                    status = order.get("orderStatus")
+
                     status = order.get("orderStatus")
                     # Map to format expected by Tracker (like Binance)
                     adapted_event = {

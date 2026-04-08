@@ -1,7 +1,5 @@
 import asyncio
 import logging
-import uuid
-from datetime import UTC, datetime
 from typing import Any, final
 
 from discord_trade_bot.core.application.common.interfaces.notification import (
@@ -142,16 +140,41 @@ class ProcessSignalUseCase:
                 await self._notification_gateway.send_message(warning_msg)
                 return {"success": False, "exchange": exchange_name, "reason": "Position exists on exchange"}
 
-            # Check for opposite side position
-            opposite_side = TradeSide.SHORT if sig.side == TradeSide.LONG else TradeSide.LONG
-            if exchange.is_position_open(position_on_exchange, opposite_side):
-                logger.warning(f"Opposite position exists for {sig.symbol} on {exchange_name}")
-                # Check if tracked in DB
-                opposite_positions = await self._state_repository.get_open_positions_by_symbol_and_exchange(symbol=sig.symbol, exchange=exchange_name)
-                # Continue anyway (allow hedging or let opening.py handle it)
-
             # Check for pending entry orders
             try:
+                # Check in database first for pending entries
+                existing_pending = await self._state_repository.get_pending_entry_by_symbol(sig.symbol)
+
+                if existing_pending and existing_pending.exchange == exchange_name:
+                    # Cancel old pending entry order
+                    logger.info(f"🗑️ Cancelling old pending entry for {sig.symbol} on {exchange_name}")
+
+                    try:
+                        # Cancel entry order
+                        await exchange.cancel_order(sig.symbol, existing_pending.order_id)
+                        logger.info(f"✅ Cancelled old entry order {existing_pending.order_id}")
+
+                        # Cancel protective SL if exists
+                        if existing_pending.sl_order_id:
+                            await exchange.cancel_order(sig.symbol, existing_pending.sl_order_id)
+                            logger.info(f"✅ Cancelled old SL order {existing_pending.sl_order_id}")
+
+                        # Cancel protective TPs if exist
+                        for tp_order_id in existing_pending.tp_order_ids:
+                            await exchange.cancel_order(sig.symbol, tp_order_id)
+                        if existing_pending.tp_order_ids:
+                            logger.info(f"✅ Cancelled {len(existing_pending.tp_order_ids)} old TP orders")
+
+                        # Delete from database
+                        await self._state_repository.delete_pending_entry(sig.symbol)
+
+                        await self._notification_gateway.send_message(f"🗑️ Cancelled old pending entry for {sig.symbol} on {exchange_name}\nNew signal received - placing new order")
+
+                    except Exception as e:
+                        logger.error(f"Failed to cancel old pending entry for {sig.symbol}: {e}")
+                        # Continue anyway - exchange will reject if there's a conflict
+
+                # Check for open orders on exchange
                 open_orders = await exchange.list_open_orders(sig.symbol)
                 entry_orders = [order for order in open_orders if not order.get("reduceOnly", False)]
 
@@ -161,7 +184,7 @@ class ProcessSignalUseCase:
                     await self._notification_gateway.send_message(warning_msg)
                     return {"success": False, "exchange": exchange_name, "reason": "Pending entry orders exist"}
             except Exception as e:
-                logger.warning(f"Failed to check open orders for {sig.symbol} on {exchange_name}: {e}")
+                logger.warning(f"Failed to check pending entries for {sig.symbol} on {exchange_name}: {e}")
 
             # Open position
             logger.info(f"Opening position on {exchange_name}: {sig.symbol} {sig.side} [Leverage: {sig.leverage}]")

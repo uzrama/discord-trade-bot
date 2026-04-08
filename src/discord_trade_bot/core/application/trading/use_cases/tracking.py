@@ -6,6 +6,7 @@ from typing import Any, final
 from discord_trade_bot.core.application.common.interfaces.notification import NotificationGatewayProtocol
 from discord_trade_bot.core.application.common.interfaces.repository import StateRepositoryProtocol
 from discord_trade_bot.core.application.trading.interfaces import ExchangeGatewayProtocol, ExchangeRegistryProtocol
+from discord_trade_bot.core.domain.entities.pending_entry import PendingEntryEntity
 from discord_trade_bot.core.domain.entities.position import ActivePositionEntity
 from discord_trade_bot.core.domain.services.breakeven_calculator import calculate_realized_pnl
 from discord_trade_bot.core.domain.value_objects.trading import BreakevenMoveResult, PositionStatus, TPDistributionRow, TradeSide
@@ -68,7 +69,7 @@ class ProcessTrackerEventUseCase:
         symbol = order_info.get("s", "")
         status = order_info.get("X", "")
 
-        logger.info(f"WebSocket event for {symbol}: order_id={order_id}, status={status}, event_type={event.get('e')}")
+        logger.debug(f"WebSocket event for {symbol}: order_id={order_id}, status={status}, event_type={event.get('e')}")
 
         # Check if this is a pending entry fill
         if status == "FILLED":
@@ -80,6 +81,15 @@ class ProcessTrackerEventUseCase:
 
         # Check pending entries for SL hit (price monitoring)
         await self._check_pending_entries_sl_hit(symbol)
+
+        # Check if this is a protective SL trigger for pending entry
+        if status == "FILLED":
+            pending_entry = await self._state_repository.get_pending_entry_by_symbol(symbol)
+            if pending_entry and order_id == str(pending_entry.sl_order_id):
+                logger.info(f"🛑 [PENDING SL] Protective SL triggered for {symbol}")
+                exchange = self._exchange_registry.get_exchange(pending_entry.exchange)
+                await self._handle_pending_entry_sl_trigger(pending_entry, exchange)
+                return  # Stop further processing
 
         # Continue with existing logic for active positions
         # For conditional orders (TP/SL), Binance uses 'si' (algoId), otherwise 'i' (orderId)
@@ -152,6 +162,11 @@ class ProcessTrackerEventUseCase:
                     # Check if position is closed first
                     if position.tp_index_hit >= len(position.take_profits):
                         logger.info(f"DONE [USE CASE] All TPs for {symbol} reached. Position closed.")
+
+                        # Cancel remaining orders (SL, reentry, etc.)
+                        exchange = self._exchange_registry.get_exchange(position.exchange)
+                        await self._cancel_all_position_orders(position, exchange)
+
                         position.status = PositionStatus.CLOSED
                     # Move SL to TP1 after third TP is hit (only if more TPs remain)
                     elif position.tp_index_hit == 3 and len(position.take_profits) > 3:
@@ -163,9 +178,9 @@ class ProcessTrackerEventUseCase:
                 elif order_id == str(position.sl_order_id):
                     logger.info(f"🛑 [USE CASE] Stop Loss filled for {symbol}. Position closed.")
 
-                    # Get exchange to cancel remaining TP orders
+                    # Get exchange to cancel all position orders (TP, reentry, etc.)
                     exchange = self._exchange_registry.get_exchange(position.exchange)
-                    await self._cancel_remaining_tp_orders(position, exchange)
+                    await self._cancel_all_position_orders(position, exchange)
 
                     # Cancel all orders for the symbol from exchange
                     await self._cancel_all_orders_for_symbol_from_exchange(symbol, exchange)
@@ -421,12 +436,13 @@ class ProcessTrackerEventUseCase:
             logger.warning(f"Failed to move SL ({reason}): {e}")
             return False
 
-    async def _cancel_remaining_tp_orders(self, position: ActivePositionEntity, exchange: ExchangeGatewayProtocol) -> None:
-        """Cancel all remaining TP orders after SL hit or position close.
+    async def _cancel_all_position_orders(self, position: ActivePositionEntity, exchange: ExchangeGatewayProtocol) -> None:
+        """Cancel all orders related to position: TP, reentry, and any other orders.
 
-        This method uses a two-step approach:
-        1. Try to cancel by known TP order IDs (if available)
-        2. Fallback: Cancel all orders for the symbol (guarantees cleanup)
+        This method uses a three-step approach:
+        1. Cancel TP orders by known order IDs
+        2. Cancel reentry order if exists
+        3. Fallback: Cancel all orders for the symbol (guarantees cleanup)
 
         Args:
             position: Active position entity
@@ -450,7 +466,15 @@ class ProcessTrackerEventUseCase:
         else:
             logger.debug(f"No TP order IDs stored for {symbol}, will use fallback")
 
-        # Step 2: Fallback - cancel all orders for the symbol (guarantees cleanup)
+        # Step 2: Cancel reentry order if exists
+        if position.reentry_order_id:
+            try:
+                await exchange.cancel_order(symbol, position.reentry_order_id)
+                logger.info(f"✅ Cancelled reentry order {position.reentry_order_id} for {symbol}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to cancel reentry order {position.reentry_order_id}: {e}")
+
+        # Step 3: Fallback - cancel all orders for the symbol (guarantees cleanup)
         try:
             await exchange.cancel_all_orders(symbol)
             logger.info(f"✅ Cancelled all remaining orders for {symbol} (fallback)")
@@ -460,7 +484,7 @@ class ProcessTrackerEventUseCase:
     async def _cancel_all_orders_for_symbol_from_exchange(self, symbol: str, exchange: ExchangeGatewayProtocol) -> None:
         """Cancel all open orders for symbol directly from exchange after SL trigger.
 
-        This method uses a direct exchange approach:
+        This method ensures complete cleanup:
         1. Cancel all orders for the symbol via exchange API
         2. Clean up pending entry from database (if exists)
 
@@ -482,7 +506,7 @@ class ProcessTrackerEventUseCase:
             pending_entry = await self._state_repository.get_pending_entry_by_symbol(symbol)
             if pending_entry:
                 await self._state_repository.delete_pending_entry(symbol)
-                logger.info(f"✅ Removed pending entry for {symbol} from database")
+                logger.info(f"✅ Removed pending entry for {symbol} (had limit order, protective SL/TP)")
             else:
                 logger.debug(f"No pending entry found in database for {symbol}")
         except Exception as e:
@@ -497,8 +521,8 @@ class ProcessTrackerEventUseCase:
         """
         symbol = position.symbol
 
-        # Cancel all TP orders before closing position
-        await self._cancel_remaining_tp_orders(position, exchange)
+        # Cancel all position orders before closing position
+        await self._cancel_all_position_orders(position, exchange)
 
         close_side = TradeSide.SHORT if position.side == TradeSide.LONG else TradeSide.LONG
 
@@ -965,3 +989,55 @@ class ProcessTrackerEventUseCase:
         # Delete pending entry from database
         await self._state_repository.delete_pending_entry(symbol)
         logger.info(f"✅ Pending entry for {symbol} removed due to SL hit")
+
+    async def _handle_pending_entry_sl_trigger(
+        self,
+        pending_entry: PendingEntryEntity,
+        exchange: ExchangeGatewayProtocol,
+    ) -> None:
+        """Handle protective SL trigger for pending entry.
+
+        When protective SL is triggered before limit order fills:
+        1. Cancel the limit order
+        2. Cancel all protective TP orders
+        3. Remove pending entry from database
+        4. Send notification
+
+        Args:
+            pending_entry: Pending entry entity
+            exchange: Exchange gateway
+        """
+        symbol = pending_entry.symbol
+
+        logger.info(f"🛑 [PENDING SL] Cancelling limit order for {symbol}")
+
+        # Cancel limit order
+        try:
+            await exchange.cancel_order(symbol, pending_entry.order_id)
+            logger.info(f"✅ Cancelled limit order {pending_entry.order_id} for {symbol}")
+        except Exception as e:
+            logger.error(f"⚠️ Failed to cancel limit order {pending_entry.order_id}: {e}")
+
+        # Cancel protective TP orders
+        if pending_entry.tp_order_ids:
+            for i, tp_order_id in enumerate(pending_entry.tp_order_ids, start=1):
+                try:
+                    await exchange.cancel_order(symbol, tp_order_id)
+                    logger.info(f"✅ Cancelled protective TP{i} order {tp_order_id} for {symbol}")
+                except Exception as e:
+                    logger.error(f"⚠️ Failed to cancel protective TP{i} for {symbol}: {e}")
+
+        # Send notification
+        side_str = "LONG" if pending_entry.side == TradeSide.LONG else "SHORT"
+        message = (
+            f"🛑 **{symbol}**: Protective SL triggered!\n"
+            f"Side: {side_str}\n"
+            f"Entry Price: {pending_entry.entry_price:.8f}\n"
+            f"Stop Loss: {pending_entry.stop_loss:.8f}\n"
+            f"Limit order cancelled before entry"
+        )
+        await self._notification_gateway.send_message(message)
+
+        # Delete pending entry from database
+        await self._state_repository.delete_pending_entry(symbol)
+        logger.info(f"✅ Pending entry removed for {symbol} after SL trigger")

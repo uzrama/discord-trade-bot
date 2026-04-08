@@ -26,3 +26,5 @@ class ParsedSignalEntity:
     seen_at: datetime = field(default_factory=_now_utc)
     contains_tp1_hit: bool = False
     entry_triggered: bool = False
+    awaiting_entry: bool = False
+    enter_on_trigger: bool = False

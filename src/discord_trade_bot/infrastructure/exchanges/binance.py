@@ -239,6 +239,53 @@ class BinanceFuturesAdapter(BaseExchangeAdapter):
         return res
 
     @override
+    async def place_conditional_market_order(
+        self,
+        symbol: str,
+        side: TradeSide,
+        trigger_price: float,
+        qty: float,
+    ) -> dict[str, Any]:
+        """Place conditional market order for entry on Binance.
+
+        Uses STOP_MARKET order type:
+        - LONG (BUY): triggers when price rises to stopPrice
+        - SHORT (SELL): triggers when price falls to stopPrice
+        """
+        client = await self._get_client()
+        side_val = "BUY" if side == TradeSide.LONG else "SELL"
+
+        # Get symbol precision
+        try:
+            symbol_info = await self.get_symbol_info(symbol)
+            price_precision = symbol_info.get("price_precision", 8)
+            qty_precision = symbol_info.get("qty_precision", 6)
+        except Exception as e:
+            logger.warning(f"Could not get symbol info for {symbol}: {e}. Using defaults.")
+            price_precision = 8
+            qty_precision = 6
+
+        # Format values
+        stop_price_str = self._format_number(round(trigger_price, price_precision), price_precision)
+        qty_str = format_quantity(round(qty, qty_precision))
+
+        logger.info(f"[Binance] Placing conditional market order: {symbol} {side_val} qty={qty_str} stopPrice={stop_price_str}")
+
+        res = await client.futures_create_order(
+            symbol=symbol,
+            side=side_val,
+            type="STOP_MARKET",
+            stopPrice=stop_price_str,
+            quantity=qty_str,
+            workingType="MARK_PRICE",
+            reduceOnly="false",
+        )
+
+        logger.info(f"[Binance] Conditional market order placed: orderId={res.get('orderId')}")
+
+        return res
+
+    @override
     async def cancel_order(self, symbol: str, order_id: str | int) -> dict[str, Any]:
         client = await self._get_client()
         res = await client.futures_cancel_order(symbol=symbol, orderId=order_id)

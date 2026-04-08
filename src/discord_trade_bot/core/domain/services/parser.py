@@ -135,6 +135,7 @@ class SignalParserService:
 
     _RE_ENTRY_CMP = re.compile(r"ENTRY\s*[:\-]\s*CMP\b")
     _RE_ENTRY_PATTERNS = (
+        re.compile(r"\bENTER\s+ON\s+TRIGGER\s*[:\-]?\s*`?\$?([0-9]+(?:\.[0-9]+)?)`?"),
         re.compile(r"\bENTRY(?:\s+PRICE)?\s*[:\-]?\s*`?\$?([0-9]+(?:\.[0-9]+)?)`?"),
         re.compile(r"\bENTRY\s+FILLED\s+AT\s*`?\$?([0-9]+(?:\.[0-9]+)?)`?"),
         re.compile(r"\bTRIGGERED\s+AT\s*`?\$?([0-9]+(?:\.[0-9]+)?)`?"),
@@ -147,6 +148,8 @@ class SignalParserService:
     _RE_TP_2 = re.compile(r"\bTP[L]?[0-9]*\s*[:\-]?\s*`?\$?([0-9]+(?:\.[0-9]+)?)`?")
     _RE_TP_HIT = re.compile(r"\b(TP1\s*HIT|TARGET\s*1\s*REACHED|NEXT\s*TARGET\s*[:\-]\s*TP2)\b")
     _RE_TRIGGERED = re.compile(r"\bENTRY\b[\s\S]{0,40}\bTRIGGERED\b|\bENTRY\s+TRIGGERED\b|\bACTIVE\s+TRADE\b|\bBREAKEVEN\b")
+    _RE_AWAITING_ENTRY = re.compile(r"⏳\s*AWAITING\s+ENTRY|WAITING\s+FOR.*TRIGGER")
+    _RE_ENTER_ON_TRIGGER = re.compile(r"\bENTER\s+ON\s+TRIGGER\b")
 
     def parse(self, source_id: str, message_id: str, text: str) -> ParsedSignalEntity:
         raw = text or ""
@@ -390,6 +393,10 @@ class SignalParserService:
                 self._set_symbol(sig, context, m.group(1), rank=20)
 
     def _parse_entry(self, text_up: str, sig: ParsedSignalEntity) -> None:
+        # Check for "Enter on Trigger" phrase
+        if self._RE_ENTER_ON_TRIGGER.search(text_up):
+            sig.enter_on_trigger = True
+
         if self._RE_ENTRY_CMP.search(text_up):
             sig.entry_mode = EntryMode.CMP
             sig.is_signal = True
@@ -452,7 +459,7 @@ class SignalParserService:
 
                 # Skip service lines and lines with SL
                 if re.search(
-                    r"\b(?:SL|STOP\s*LOSS|LEVERAGE|TRADE\s*NOW|BYBIT|MEXC|BLOFIN|BITGET|AO\s*TRADING|"
+                    r"\b(?:SL|STOP[\s\-]*LOSS|LEVERAGE|TRADE\s*NOW|BYBIT|MEXC|BLOFIN|BITGET|AO\s*TRADING|"
                     r"WIN\s*TOGETHER|DCA(?:\s*LEVELS?)?|BREAKEVEN|NOTES?|CALLER|CURRENT|P&L|"
                     r"FINAL\s*PRICE|CLOSED)\b",
                     line,
@@ -483,7 +490,7 @@ class SignalParserService:
 
                 # End of TP block
                 if in_tp_block and re.search(
-                    r"\b(?:SL|STOP\s*LOSS|ENTRY|LEVERAGE|TRADE\s*NOW|BYBIT|MEXC|BLOFIN|BITGET|"
+                    r"\b(?:SL|STOP[\s\-]*LOSS|ENTRY|LEVERAGE|TRADE\s*NOW|BYBIT|MEXC|BLOFIN|BITGET|"
                     r"ACTIVE\s*TRADE|BREAKEVEN|DCA(?:\s*LEVELS?)?|NOTES?|CALLER|CURRENT|P&L|"
                     r"FINAL\s*PRICE|CLOSED)\b",
                     line,
@@ -532,6 +539,13 @@ class SignalParserService:
         sig.entry_triggered = bool(self._RE_TRIGGERED.search(text_up))
 
     def _finalize_signal_type(self, text_up: str, sig: ParsedSignalEntity) -> None:
+        # Check for awaiting entry status
+        if self._RE_AWAITING_ENTRY.search(text_up):
+            sig.awaiting_entry = True
+            sig.is_signal = True
+            if sig.signal_type == SignalType.UNKNOWN:
+                sig.signal_type = SignalType.PRIMARY_SIGNAL
+
         # Simplified logic - process all signals with symbol and side
         if (sig.stop_loss or sig.take_profits or sig.contains_tp1_hit) and not sig.is_signal:
             sig.signal_type = SignalType.SIGNAL_UPDATE
