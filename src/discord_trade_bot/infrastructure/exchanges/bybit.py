@@ -355,7 +355,7 @@ class BybitAdapter(BaseExchangeAdapter):
 
         try:
             balance = await self.get_balance()
-            logger.info(f"📡 Connecting to Bybit WebSocket (testnet={self.testnet}, demo={self.demo}, name={self.account_name}, balance={balance})")
+            logger.info(f"📡 Connecting to Bybit WebSocket (testnets={self.testnet}, demo={self.demo}, name={self.account_name}, balance={balance})")
             self._ws = WebSocket(testnet=self.testnet, demo=self.demo, channel_type="private", api_key=self.api_key, api_secret=self.api_secret)
 
             # Subscribe to order events
