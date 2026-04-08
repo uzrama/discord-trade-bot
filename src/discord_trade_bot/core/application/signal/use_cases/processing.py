@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import uuid
 from datetime import UTC, datetime
 from typing import Any, final
 
@@ -24,6 +26,7 @@ from discord_trade_bot.core.domain.entities.position import ActivePositionEntity
 from discord_trade_bot.core.domain.services.parser import SignalParserService
 from discord_trade_bot.core.domain.value_objects.trading import PositionStatus, TradeSide
 from discord_trade_bot.main.config.app import AppConfig
+from discord_trade_bot.main.config.yaml.discord import ExchangeSettings, Source
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,180 @@ class ProcessSignalUseCase:
             config=config,
         )
 
+    async def _check_duplicate_for_exchange(
+        self,
+        sig,
+        exchange_name: str,
+        existing_positions: list[Any],
+    ) -> tuple[bool, str | None]:
+        """
+        Check if position already exists for given exchange.
+
+        Returns:
+            (should_skip, reason) - True if should skip opening, with optional reason
+        """
+        if not existing_positions:
+            return False, None
+
+        existing_pos = existing_positions[0]
+        exchange = self._exchange_registry.get_exchange(exchange_name)
+
+        try:
+            position_on_exchange = await exchange.get_position(sig.symbol)
+
+            if exchange.is_position_open(position_on_exchange, existing_pos.side):
+                # Position is OPEN on exchange - skip
+                warning_msg = f"⚠️ Position for {sig.symbol} is already open on {exchange_name}\nEntry: {existing_pos.entry_price}\nQty: {existing_pos.qty}\nSkipping this exchange."
+                logger.warning(f"Duplicate position detected: {sig.symbol} on {exchange_name}")
+                await self._notification_gateway.send_message(warning_msg)
+                return True, f"Duplicate position on {exchange_name}"
+            else:
+                # Position is CLOSED on exchange but exists in DB - allow
+                logger.info(f"📊 Position {sig.symbol} found in DB for {exchange_name} but NOT open on exchange. Allowing new position.")
+                return False, None
+
+        except Exception as e:
+            logger.error(f"Failed to check position on {exchange_name} for {sig.symbol}: {e}")
+            return True, f"Failed to verify position on {exchange_name}"
+
+    async def _open_position_on_exchange(
+        self,
+        sig,
+        dto: ProcessSignalDTO,
+        source_cfg: Source,
+        exchange_cfg: ExchangeSettings,
+    ) -> dict[str, Any]:
+        """
+        Open position on a single exchange.
+
+        Returns dict with:
+            - success: bool
+            - exchange: str
+            - reason: str | None
+            - position_data: dict | None (if successful)
+        """
+        exchange_name = exchange_cfg.name
+
+        try:
+            # Check for duplicate in DB
+            existing_positions = await self._state_repository.get_open_positions_by_symbol_and_exchange(symbol=sig.symbol, exchange=exchange_name)
+
+            # Check if duplicate exists
+            should_skip, reason = await self._check_duplicate_for_exchange(sig, exchange_name, existing_positions)
+            if should_skip:
+                return {"success": False, "exchange": exchange_name, "reason": reason}
+
+            # Check for position on exchange (not in DB)
+            exchange = self._exchange_registry.get_exchange(exchange_name)
+            position_on_exchange = await exchange.get_position(sig.symbol)
+
+            if exchange.is_position_open(position_on_exchange, sig.side):
+                warning_msg = f"⚠️ Position for {sig.symbol} {sig.side.value} already exists on {exchange_name} but not in database. Skipping this exchange."
+                logger.warning(f"Position exists on {exchange_name} but not in DB: {sig.symbol}")
+                await self._notification_gateway.send_message(warning_msg)
+                return {"success": False, "exchange": exchange_name, "reason": "Position exists on exchange"}
+
+            # Check for opposite side position
+            opposite_side = TradeSide.SHORT if sig.side == TradeSide.LONG else TradeSide.LONG
+            if exchange.is_position_open(position_on_exchange, opposite_side):
+                logger.warning(f"Opposite position exists for {sig.symbol} on {exchange_name}")
+                # Check if tracked in DB
+                opposite_positions = await self._state_repository.get_open_positions_by_symbol_and_exchange(symbol=sig.symbol, exchange=exchange_name)
+                # Continue anyway (allow hedging or let opening.py handle it)
+
+            # Check for pending entry orders
+            try:
+                open_orders = await exchange.list_open_orders(sig.symbol)
+                entry_orders = [order for order in open_orders if not order.get("reduceOnly", False)]
+
+                if entry_orders:
+                    warning_msg = f"⚠️ Pending entry order(s) found for {sig.symbol} on {exchange_name}\nCount: {len(entry_orders)}\nSkipping this exchange."
+                    logger.warning(f"Pending entry orders for {sig.symbol} on {exchange_name}: {len(entry_orders)}")
+                    await self._notification_gateway.send_message(warning_msg)
+                    return {"success": False, "exchange": exchange_name, "reason": "Pending entry orders exist"}
+            except Exception as e:
+                logger.warning(f"Failed to check open orders for {sig.symbol} on {exchange_name}: {e}")
+
+            # Open position
+            logger.info(f"Opening position on {exchange_name}: {sig.symbol} {sig.side} [Leverage: {sig.leverage}]")
+
+            tp_distributions_dict: dict[int, list[dict[str, Any]]] = {}
+            if source_cfg.tp_distributions:
+                tp_distributions_dict = {k: [tp.model_dump() for tp in v] for k, v in source_cfg.tp_distributions.items()}
+
+            settings = TradeSettingsDTO(
+                exchange=exchange_name,
+                fixed_leverage=source_cfg.fixed_leverage,
+                position_size_pct=exchange_cfg.position_size_pct,
+                default_sl_percent=source_cfg.default_sl_percent,
+                tp_distribution=tp_distributions_dict,
+            )
+
+            res = await self._open_position_use_case.execute(sig, settings)
+
+            if not res.success:
+                logger.error(f"❌ Error opening trade on {exchange_name}: {res.reason}")
+                return {"success": False, "exchange": exchange_name, "reason": res.reason}
+
+            # Extract position data
+            entry_order_id = str(res.order.get("orderId", "")) if res.order else ""
+            sl_tp_res = res.sl_tp_res or {}
+            sl_order = sl_tp_res.get("stop_loss")
+            sl_order_id = str(sl_order.get("algoId") or sl_order.get("orderId") or "") if sl_order else None
+
+            tp_order_ids = {}
+            for i, tp_order in enumerate(sl_tp_res.get("take_profits", [])):
+                order_id = tp_order.get("algoId") or tp_order.get("orderId")
+                if order_id and i < len(sig.take_profits):
+                    tp_price = float(sig.take_profits[i])
+                    tp_order_ids[str(order_id)] = tp_price
+
+            # Determine if position needs to wait for signal updates
+            needs_signal_stop_update = sig.stop_loss is None and res.final_sl is None
+            needs_signal_tp_update = not sig.take_profits
+
+            position_status = PositionStatus.WAITING_UPDATE if (needs_signal_stop_update or needs_signal_tp_update) else PositionStatus.OPEN
+
+            # Save position state
+            position = ActivePositionEntity(
+                symbol=sig.symbol,
+                source_id=dto.source_id,
+                message_id=dto.message_id,
+                exchange=exchange_name,
+                side=sig.side,
+                qty=res.qty,
+                entry_price=res.entry_price,
+                stop_loss=res.final_sl,
+                is_default_sl=res.is_default_sl,
+                take_profits=sig.take_profits,
+                order_id=entry_order_id,
+                sl_order_id=sl_order_id,
+                tp_order_ids=tp_order_ids,
+                remaining_qty=res.qty,
+                closed_qty=0.0,
+                realized_pnl_usdt=0.0,
+                status=position_status,
+                message_hash=sig.message_hash,
+                needs_signal_stop_update=needs_signal_stop_update,
+                needs_signal_tp_update=needs_signal_tp_update,
+                temporary_stop=res.final_sl if needs_signal_stop_update else None,
+            )
+
+            await self._state_repository.save_position(position)
+
+            logger.info(f"✅ Position opened on {exchange_name}: {sig.symbol} {sig.side}")
+
+            return {
+                "success": True,
+                "exchange": exchange_name,
+                "position_data": position,
+                "pending": res.pending,
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Unexpected error opening position on {exchange_name}: {e}", exc_info=True)
+            return {"success": False, "exchange": exchange_name, "reason": str(e)}
+
     async def execute(self, dto: ProcessSignalDTO) -> SignalProcessingResultDTO:
         """Process a trading signal and open a position if valid.
 
@@ -105,194 +282,64 @@ class ProcessSignalUseCase:
                 logger.warning(f"Unknown channel {dto.channel_id}")
                 return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason="Unknown channel")
 
-            # Check for duplicate position on the same exchange (in local database)
-            existing_positions = await self._state_repository.get_open_positions_by_symbol_and_exchange(symbol=sig.symbol, exchange=source_cfg.exchange)
+            # Check for duplicate positions across all configured exchanges
+            existing_positions_by_exchange: dict[str, list[Any]] = {}
+            for exchange_cfg in source_cfg.exchanges:
+                positions = await self._state_repository.get_open_positions_by_symbol_and_exchange(symbol=sig.symbol, exchange=exchange_cfg.name)
+                if positions:
+                    existing_positions_by_exchange[exchange_cfg.name] = positions
 
-            if existing_positions:
-                # Check if this is an edited message (same message_id as existing position)
-                for existing_pos in existing_positions:
+            # Check if this is an edited message across any exchange
+            for exchange_name, positions in existing_positions_by_exchange.items():
+                for existing_pos in positions:
                     if existing_pos.message_id == dto.message_id:
-                        # This is an edited message, treat as signal update
-                        logger.info(f"Detected edited message for {sig.symbol} (message_id: {dto.message_id}), processing as update")
+                        logger.info(f"Detected edited message for {sig.symbol} on {exchange_name} (message_id: {dto.message_id})")
                         return await self._handle_signal_update_use_case.execute(sig, dto)
 
-                # Position found in DB - check if it's actually open on exchange
-                existing_pos = existing_positions[0]
-                exchange = self._exchange_registry.get_exchange(source_cfg.exchange)
+            # Open positions on all exchanges in parallel
+            logger.info(f"Opening position: {sig.symbol} {sig.side} [Leverage: {sig.leverage}] [Entry: {sig.entry_price}]")
+            logger.info(f"Will attempt to open on {len(source_cfg.exchanges)} exchange(s): {[ex.name for ex in source_cfg.exchanges]}")
 
-                try:
-                    position_on_exchange = await exchange.get_position(sig.symbol)
+            tasks = [self._open_position_on_exchange(sig, dto, source_cfg, exchange_cfg) for exchange_cfg in source_cfg.exchanges]
 
-                    # Check if position is actually open on exchange
-                    if exchange.is_position_open(position_on_exchange, existing_pos.side):
-                        # Position is OPEN on exchange - block duplicate, DO NOT modify DB
-                        warning_msg = (
-                            f"⚠️ Position for {sig.symbol} is already open on {source_cfg.exchange}\nEntry: {existing_pos.entry_price}\nQty: {existing_pos.qty}\nNew signal ignored."
-                        )
-                        logger.warning(f"Duplicate position detected: {sig.symbol} on {source_cfg.exchange}")
-                        await self._notification_gateway.send_message(warning_msg)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                        return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Duplicate position: {sig.symbol} already open on {source_cfg.exchange}")
-                    else:
-                        # Position is CLOSED on exchange but exists in DB - allow new position, DO NOT modify DB
-                        logger.info(
-                            f"📊 Position {sig.symbol} found in DB (status: {existing_pos.status}, ID: {existing_pos.id}) "
-                            f"but NOT open on exchange. Allowing new position to be opened."
-                        )
-                        # Continue to open new position (don't return here, don't modify DB)
+            # Process results
+            successful_exchanges = []
+            failed_exchanges = []
 
-                except Exception as e:
-                    logger.error(f"Failed to check position on exchange for {sig.symbol}: {e}. Blocking signal for safety.")
-                    # If check fails, block signal (safe default)
-                    return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Failed to verify position status on exchange: {sig.symbol}")
+            for i, result in enumerate(results):
+                exchange_name = source_cfg.exchanges[i].name
 
-            # Check for position on exchange (not just in database)
-            # This catches manually opened positions or database sync issues
-            exchange = self._exchange_registry.get_exchange(source_cfg.exchange)
+                if isinstance(result, Exception):
+                    logger.error(f"❌ Exception opening position on {exchange_name}: {result}")
+                    failed_exchanges.append({"exchange": exchange_name, "reason": str(result)})
+                elif isinstance(result, dict) and result.get("success"):
+                    successful_exchanges.append(result)
+                    logger.info(f"✅ Successfully opened position on {exchange_name}")
+                elif isinstance(result, dict):
+                    failed_exchanges.append(result)
+                    logger.warning(f"⚠️ Failed to open position on {exchange_name}: {result.get('reason')}")
 
-            try:
-                position_on_exchange = await exchange.get_position(sig.symbol)
+            # Send summary notification
+            if successful_exchanges:
+                summary_msg = f"✅ Position opened for {sig.symbol} {sig.side.value}\n"
+                summary_msg += f"Successful: {len(successful_exchanges)}/{len(source_cfg.exchanges)} exchanges\n"
+                summary_msg += f"Exchanges: {', '.join([r['exchange'] for r in successful_exchanges])}"
 
-                if exchange.is_position_open(position_on_exchange, sig.side):
-                    # Position exists on exchange but not in DB
-                    warning_msg = (
-                        f"⚠️ Position for {sig.symbol} {sig.side.value} already exists on {source_cfg.exchange} "
-                        f"but not found in local database.\n"
-                        f"This may indicate:\n"
-                        f"• Manual position opened via exchange UI\n"
-                        f"• Database synchronization issue\n"
-                        f"New signal ignored."
-                    )
-                    logger.warning(f"Position exists on exchange but not in DB: {sig.symbol} {sig.side.value}")
-                    await self._notification_gateway.send_message(warning_msg)
+                if failed_exchanges:
+                    summary_msg += f"\n\n⚠️ Failed on: {', '.join([r['exchange'] for r in failed_exchanges])}"
 
-                    return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Position already exists on exchange: {sig.symbol}")
+                await self._notification_gateway.send_message(summary_msg)
 
-                # Check for opposite side position (hedging check)
-                opposite_side = TradeSide.SHORT if sig.side == TradeSide.LONG else TradeSide.LONG
-                if exchange.is_position_open(position_on_exchange, opposite_side):
-                    # Opposite position exists - sync DB and allow new position
-                    logger.warning(f"Opposite position ({opposite_side.value}) exists for {sig.symbol} on {source_cfg.exchange}. Checking if it's tracked in database...")
-
-                    # Check if opposite position is in DB
-                    opposite_positions = await self._state_repository.get_open_positions_by_symbol_and_exchange(symbol=sig.symbol, exchange=source_cfg.exchange)
-
-                    # Sync any opposite positions in DB
-                    for opp_pos in opposite_positions:
-                        if opp_pos.side == opposite_side:
-                            logger.warning(f"Opposite position {sig.symbol} {opposite_side.value} found in DB but closed on exchange. Synchronizing database...")
-                            opp_pos.status = PositionStatus.CLOSED
-                            await self._state_repository.save_position(opp_pos)
-                            logger.info(f"Database synchronized: Opposite position {sig.symbol} {opposite_side.value} marked as CLOSED.")
-
-                    # Allow opening new position in opposite direction
-                    logger.info(f"Proceeding to open {sig.side.value} position for {sig.symbol}")
-                    # Continue to open new position (don't return here)
-
-            except Exception as e:
-                logger.warning(f"Failed to check position on exchange for {sig.symbol}: {e}. Proceeding with caution.")
-                # Continue anyway - will be caught by opening.py final check
-
-            # Check for pending entry orders
-            try:
-                open_orders = await exchange.list_open_orders(sig.symbol)
-                entry_orders = [
-                    order
-                    for order in open_orders
-                    if not order.get("reduceOnly", False)  # Not a closing order
-                ]
-
-                if entry_orders:
-                    warning_msg = (
-                        f"⚠️ Pending entry order(s) found for {sig.symbol} on {source_cfg.exchange}\nCount: {len(entry_orders)}\nNew signal ignored to avoid duplicate entries."
-                    )
-                    logger.warning(f"Pending entry orders found for {sig.symbol}: {len(entry_orders)}")
-                    await self._notification_gateway.send_message(warning_msg)
-
-                    return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason=f"Pending entry orders exist: {sig.symbol}")
-            except Exception as e:
-                logger.warning(f"Failed to check open orders for {sig.symbol}: {e}. Proceeding with caution.")
-                # Continue anyway - will be caught by opening.py final check
-
-            logger.info(f"Opening position: {sig.symbol} {sig.side} [Leverage: {sig.leverage}] [Entry price: {sig.entry_price}]")
-
-            # Convert tp_distribution or tp_distributions to the new format
-            tp_distributions_dict: dict[int, list[dict[str, Any]]] = {}
-
-            # Check if new format exists
-            if source_cfg.tp_distributions:
-                tp_distributions_dict = {k: [tp.model_dump() for tp in v] for k, v in source_cfg.tp_distributions.items()}
-            # Fallback to old format for backward compatibility
-            # elif source_cfg.tp_distribution:
-            #     # Convert old format to new format: use length as key
-            #     num_tps = len(source_cfg.tp_distribution)
-            #     tp_distributions_dict = {num_tps: [tp.model_dump() for tp in source_cfg.tp_distribution]}
-
-            settings = TradeSettingsDTO(
-                exchange=source_cfg.exchange,
-                fixed_leverage=source_cfg.fixed_leverage,
-                position_size_pct=source_cfg.position_size_pct,
-                default_sl_percent=source_cfg.default_sl_percent,
-                tp_distribution=tp_distributions_dict,
-            )
-            res = await self._open_position_use_case.execute(sig, settings)
-            if not res.success:
-                logger.error(f"❌ Error opening trade: {res.reason}")
+                return SignalProcessingResultDTO(success=True, message_id=dto.message_id, reason=f"Opened on {len(successful_exchanges)} exchange(s)")
             else:
-                # Extract and Save Position State
-                entry_order_id = str(res.order.get("orderId", "")) if res.order else ""
-                sl_tp_res = res.sl_tp_res or {}
-                sl_order = sl_tp_res.get("stop_loss")
-                # Binance Futures returns algoId for conditional orders (SL/TP)
-                sl_order_id = str(sl_order.get("algoId") or sl_order.get("orderId") or "") if sl_order else None
+                error_msg = f"❌ Failed to open position for {sig.symbol} on all exchanges\n"
+                error_msg += "\n".join([f"• {r['exchange']}: {r.get('reason', 'Unknown')}" for r in failed_exchanges])
 
-                tp_order_ids = {}
-                for i, tp_order in enumerate(sl_tp_res.get("take_profits", [])):
-                    # Binance Futures returns algoId for conditional orders
-                    order_id = tp_order.get("algoId") or tp_order.get("orderId")
-                    if order_id and i < len(sig.take_profits):
-                        tp_price = float(sig.take_profits[i])
-                        tp_order_ids[str(order_id)] = tp_price
-                # Determine if position needs to wait for signal updates
-                # If signal has no SL/TP, mark position as waiting for updates
-                needs_signal_stop_update = sig.stop_loss is None and res.final_sl is None
-                needs_signal_tp_update = not sig.take_profits
+                await self._notification_gateway.send_message(error_msg)
 
-                position_status = PositionStatus.WAITING_UPDATE if (needs_signal_stop_update or needs_signal_tp_update) else PositionStatus.OPEN
-
-                position = ActivePositionEntity(
-                    symbol=sig.symbol,
-                    source_id=dto.source_id,
-                    message_id=dto.message_id,
-                    exchange=source_cfg.exchange,
-                    side=sig.side,
-                    qty=res.qty,
-                    entry_price=res.entry_price,
-                    stop_loss=res.final_sl,
-                    is_default_sl=res.is_default_sl,
-                    take_profits=sig.take_profits,
-                    order_id=entry_order_id,
-                    sl_order_id=sl_order_id,
-                    tp_order_ids=tp_order_ids,
-                    # Initialize tracking fields for breakeven calculation
-                    remaining_qty=res.qty,  # Initially equals full quantity
-                    closed_qty=0.0,
-                    realized_pnl_usdt=0.0,
-                    # Signal update tracking fields
-                    status=position_status,
-                    message_hash=sig.message_hash,
-                    needs_signal_stop_update=needs_signal_stop_update,
-                    needs_signal_tp_update=needs_signal_tp_update,
-                    temporary_stop=res.final_sl if needs_signal_stop_update else None,
-                )
-
-                # Save it
-                await self._state_repository.save_position(position)
-
-                if position_status == PositionStatus.WAITING_UPDATE:
-                    logger.info(f"✅ Position {sig.symbol} saved with status WAITING_UPDATE (needs_stop={needs_signal_stop_update}, needs_tp={needs_signal_tp_update})")
-                else:
-                    logger.info(f"✅ Position {sig.symbol} saved to SQLite DB for tracking.")
+                return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason="Failed on all exchanges")
         else:
             logger.info(f"INFO This is an update or not a primary signal (type: {sig.signal_type}). Symbol: {sig.symbol}")
 

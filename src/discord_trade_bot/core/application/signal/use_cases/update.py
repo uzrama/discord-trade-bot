@@ -148,11 +148,14 @@ class HandleSignalUpdateUseCase:
             logger.warning(f"Unknown channel {dto.channel_id}")
             return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason="Unknown channel")
 
-        # Find position waiting for updates
-        positions = await self._state_repository.get_open_positions_by_symbol_and_exchange(symbol=sig.symbol, exchange=source_cfg.exchange)
+        # Find positions waiting for updates across all configured exchanges
+        all_positions = []
+        for exchange_cfg in source_cfg.exchanges:
+            positions = await self._state_repository.get_open_positions_by_symbol_and_exchange(symbol=sig.symbol, exchange=exchange_cfg.name)
+            all_positions.extend(positions)
 
         target_position = None
-        for pos in positions:
+        for pos in all_positions:
             if pos.message_id == dto.message_id:
                 # For WAITING_UPDATE: always allow update
                 if pos.status == PositionStatus.WAITING_UPDATE:
@@ -162,14 +165,33 @@ class HandleSignalUpdateUseCase:
                 elif pos.status == PositionStatus.OPEN and pos.is_default_sl and sig.stop_loss is not None:
                     target_position = pos
                     break
+                # For OPEN with full SL/TP: select it to check if we should ignore
+                elif pos.status == PositionStatus.OPEN:
+                    target_position = pos
+                    break
 
         if not target_position:
-            logger.info(f"No position found for update: {sig.symbol} on {source_cfg.exchange} (message_id: {dto.message_id})")
+            logger.info(f"No position found for update: {sig.symbol} (message_id: {dto.message_id})")
             return SignalProcessingResultDTO(
                 success=False,
                 message_id=dto.message_id,
                 reason="No position found for update",
             )
+
+        # Check if position already has full SL/TP and is not waiting for updates
+        if target_position.status == PositionStatus.OPEN:
+            if not target_position.needs_signal_stop_update and not target_position.needs_signal_tp_update:
+                logger.info(
+                    f"✋ Position {sig.symbol} already has full SL/TP (status: OPEN, "
+                    f"needs_stop_update: False, needs_tp_update: False). "
+                    f"Ignoring signal update from message {dto.message_id}."
+                )
+                return SignalProcessingResultDTO(
+                    success=False,
+                    message_id=dto.message_id,
+                    symbol=sig.symbol,
+                    reason="Position already has full SL/TP, not waiting for updates",
+                )
 
         # Check if we got new SL/TP data
         # For SL: check if signal has SL AND it's different from current SL
@@ -247,7 +269,8 @@ class HandleSignalUpdateUseCase:
         target_position.message_hash = sig.message_hash
 
         # Rebuild position risk orders (cancel old SL/TP and place new ones)
-        exchange = self._exchange_registry.get_exchange(source_cfg.exchange)
+        # Use the exchange from the position itself (not from source_cfg)
+        exchange = self._exchange_registry.get_exchange(target_position.exchange)
 
         try:
             # Prepare keep_order_ids (entry order should be kept if it exists)
