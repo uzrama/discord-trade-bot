@@ -67,6 +67,108 @@ class ProcessSignalUseCase:
             config=config,
         )
 
+    async def execute(self, dto: ProcessSignalDTO) -> SignalProcessingResultDTO:
+        """Process a trading signal and open a position if valid.
+
+        This method performs the following steps:
+        1. Parse the signal text to extract trading parameters
+        2. Validate the signal has required fields (symbol, side)
+        3. Check for duplicate positions on the same exchange
+        4. Open a new position if all checks pass
+        5. Save position state for tracking
+
+        Args:
+            dto: Data transfer object containing channel ID, message ID, and signal text.
+
+        Returns:
+            Result indicating success/failure and relevant details.
+
+        Note:
+            Duplicate positions are prevented per symbol per exchange. The same symbol
+            can be traded on different exchanges simultaneously.
+        """
+        sig = self._parser.parse(dto.channel_id, dto.message_id, dto.text)
+        if not sig.is_signal or not sig.symbol or not sig.side:
+            return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason="Invalid signal")
+
+        # Decision logic: is it a primary signal or an update?
+        if sig.signal_type == "signal_update":
+            # Handle signal update (edited message with new SL/TP)
+            logger.info(f"Processing signal update for {sig.symbol}")
+            return await self._handle_signal_update_use_case.execute(sig, dto)
+
+        if sig.signal_type == "primary_signal":
+            # Get source config
+            watch_sources = self._config.yaml.discord.watch_sources
+            source_cfg = next((s for s in watch_sources if str(s.channel_id) == str(dto.channel_id)), None)
+
+            if not source_cfg:
+                logger.warning(f"Unknown channel {dto.channel_id}")
+                return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason="Unknown channel")
+
+            # Check for duplicate positions across all configured exchanges
+            existing_positions_by_exchange: dict[str, list[Any]] = {}
+            for exchange_cfg in source_cfg.exchanges:
+                positions = await self._state_repository.get_open_positions_by_symbol_and_exchange(symbol=sig.symbol, exchange=exchange_cfg.name)
+                if positions:
+                    existing_positions_by_exchange[exchange_cfg.name] = positions
+
+            # Check if this is an edited message across any exchange
+            for exchange_name, positions in existing_positions_by_exchange.items():
+                for existing_pos in positions:
+                    if existing_pos.message_id == dto.message_id:
+                        logger.info(f"Detected edited message for {sig.symbol} on {exchange_name} (message_id: {dto.message_id})")
+                        return await self._handle_signal_update_use_case.execute(sig, dto)
+
+            # Open positions on all exchanges in parallel
+            logger.info(f"Opening position: {sig.symbol} {sig.side} [Leverage: {sig.leverage}] [Entry: {sig.entry_price}]")
+            logger.info(f"Will attempt to open on {len(source_cfg.exchanges)} exchange(s): {[ex.name for ex in source_cfg.exchanges]}")
+
+            tasks = [self._open_position_on_exchange(sig, dto, source_cfg, exchange_cfg) for exchange_cfg in source_cfg.exchanges]
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Process results
+            successful_exchanges = []
+            failed_exchanges = []
+
+            for i, result in enumerate(results):
+                exchange_name = source_cfg.exchanges[i].name
+
+                if isinstance(result, Exception):
+                    logger.error(f"❌ Exception opening position on {exchange_name}: {result}")
+                    failed_exchanges.append({"exchange": exchange_name, "reason": str(result)})
+                elif isinstance(result, dict) and result.get("success"):
+                    successful_exchanges.append(result)
+                    logger.info(f"✅ Successfully opened position on {exchange_name}")
+                elif isinstance(result, dict):
+                    failed_exchanges.append(result)
+                    logger.warning(f"⚠️ Failed to open position on {exchange_name}: {result.get('reason')}")
+
+            # Send summary notification
+            if successful_exchanges:
+                summary_msg = f"✅ Position opened for {sig.symbol} {sig.side.value}\n"
+                summary_msg += f"Successful: {len(successful_exchanges)}/{len(source_cfg.exchanges)} exchanges\n"
+                summary_msg += f"Exchanges: {', '.join([r['exchange'] for r in successful_exchanges])}"
+
+                if failed_exchanges:
+                    summary_msg += f"\n\n⚠️ Failed on: {', '.join([r['exchange'] for r in failed_exchanges])}"
+
+                await self._notification_gateway.send_message(summary_msg)
+
+                return SignalProcessingResultDTO(success=True, message_id=dto.message_id, reason=f"Opened on {len(successful_exchanges)} exchange(s)")
+            else:
+                error_msg = f"❌ Failed to open position for {sig.symbol} on all exchanges\n"
+                error_msg += "\n".join([f"• {r['exchange']}: {r.get('reason', 'Unknown')}" for r in failed_exchanges])
+
+                await self._notification_gateway.send_message(error_msg)
+
+                return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason="Failed on all exchanges")
+        else:
+            logger.info(f"INFO This is an update or not a primary signal (type: {sig.signal_type}). Symbol: {sig.symbol}")
+
+        return SignalProcessingResultDTO(success=True, message_id=dto.message_id, symbol=sig.symbol)
+
     async def _check_duplicate_for_exchange(
         self,
         sig,
@@ -265,105 +367,3 @@ class ProcessSignalUseCase:
         except Exception as e:
             logger.error(f"❌ Unexpected error opening position on {exchange_name}: {e}", exc_info=True)
             return {"success": False, "exchange": exchange_name, "reason": str(e)}
-
-    async def execute(self, dto: ProcessSignalDTO) -> SignalProcessingResultDTO:
-        """Process a trading signal and open a position if valid.
-
-        This method performs the following steps:
-        1. Parse the signal text to extract trading parameters
-        2. Validate the signal has required fields (symbol, side)
-        3. Check for duplicate positions on the same exchange
-        4. Open a new position if all checks pass
-        5. Save position state for tracking
-
-        Args:
-            dto: Data transfer object containing channel ID, message ID, and signal text.
-
-        Returns:
-            Result indicating success/failure and relevant details.
-
-        Note:
-            Duplicate positions are prevented per symbol per exchange. The same symbol
-            can be traded on different exchanges simultaneously.
-        """
-        sig = self._parser.parse(dto.channel_id, dto.message_id, dto.text)
-        if not sig.is_signal or not sig.symbol or not sig.side:
-            return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason="Invalid signal")
-
-        # Decision logic: is it a primary signal or an update?
-        if sig.signal_type == "signal_update":
-            # Handle signal update (edited message with new SL/TP)
-            logger.info(f"Processing signal update for {sig.symbol}")
-            return await self._handle_signal_update_use_case.execute(sig, dto)
-
-        if sig.signal_type == "primary_signal":
-            # Get source config
-            watch_sources = self._config.yaml.discord.watch_sources
-            source_cfg = next((s for s in watch_sources if str(s.channel_id) == str(dto.channel_id)), None)
-
-            if not source_cfg:
-                logger.warning(f"Unknown channel {dto.channel_id}")
-                return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason="Unknown channel")
-
-            # Check for duplicate positions across all configured exchanges
-            existing_positions_by_exchange: dict[str, list[Any]] = {}
-            for exchange_cfg in source_cfg.exchanges:
-                positions = await self._state_repository.get_open_positions_by_symbol_and_exchange(symbol=sig.symbol, exchange=exchange_cfg.name)
-                if positions:
-                    existing_positions_by_exchange[exchange_cfg.name] = positions
-
-            # Check if this is an edited message across any exchange
-            for exchange_name, positions in existing_positions_by_exchange.items():
-                for existing_pos in positions:
-                    if existing_pos.message_id == dto.message_id:
-                        logger.info(f"Detected edited message for {sig.symbol} on {exchange_name} (message_id: {dto.message_id})")
-                        return await self._handle_signal_update_use_case.execute(sig, dto)
-
-            # Open positions on all exchanges in parallel
-            logger.info(f"Opening position: {sig.symbol} {sig.side} [Leverage: {sig.leverage}] [Entry: {sig.entry_price}]")
-            logger.info(f"Will attempt to open on {len(source_cfg.exchanges)} exchange(s): {[ex.name for ex in source_cfg.exchanges]}")
-
-            tasks = [self._open_position_on_exchange(sig, dto, source_cfg, exchange_cfg) for exchange_cfg in source_cfg.exchanges]
-
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            # Process results
-            successful_exchanges = []
-            failed_exchanges = []
-
-            for i, result in enumerate(results):
-                exchange_name = source_cfg.exchanges[i].name
-
-                if isinstance(result, Exception):
-                    logger.error(f"❌ Exception opening position on {exchange_name}: {result}")
-                    failed_exchanges.append({"exchange": exchange_name, "reason": str(result)})
-                elif isinstance(result, dict) and result.get("success"):
-                    successful_exchanges.append(result)
-                    logger.info(f"✅ Successfully opened position on {exchange_name}")
-                elif isinstance(result, dict):
-                    failed_exchanges.append(result)
-                    logger.warning(f"⚠️ Failed to open position on {exchange_name}: {result.get('reason')}")
-
-            # Send summary notification
-            if successful_exchanges:
-                summary_msg = f"✅ Position opened for {sig.symbol} {sig.side.value}\n"
-                summary_msg += f"Successful: {len(successful_exchanges)}/{len(source_cfg.exchanges)} exchanges\n"
-                summary_msg += f"Exchanges: {', '.join([r['exchange'] for r in successful_exchanges])}"
-
-                if failed_exchanges:
-                    summary_msg += f"\n\n⚠️ Failed on: {', '.join([r['exchange'] for r in failed_exchanges])}"
-
-                await self._notification_gateway.send_message(summary_msg)
-
-                return SignalProcessingResultDTO(success=True, message_id=dto.message_id, reason=f"Opened on {len(successful_exchanges)} exchange(s)")
-            else:
-                error_msg = f"❌ Failed to open position for {sig.symbol} on all exchanges\n"
-                error_msg += "\n".join([f"• {r['exchange']}: {r.get('reason', 'Unknown')}" for r in failed_exchanges])
-
-                await self._notification_gateway.send_message(error_msg)
-
-                return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason="Failed on all exchanges")
-        else:
-            logger.info(f"INFO This is an update or not a primary signal (type: {sig.signal_type}). Symbol: {sig.symbol}")
-
-        return SignalProcessingResultDTO(success=True, message_id=dto.message_id, symbol=sig.symbol)

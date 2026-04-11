@@ -9,7 +9,7 @@ from discord_trade_bot.core.application.common.interfaces.notification import No
 from discord_trade_bot.core.application.common.interfaces.repository import StateRepositoryProtocol
 from discord_trade_bot.core.application.trading.interfaces import ExchangeGatewayProtocol, ExchangeRegistryProtocol
 from discord_trade_bot.core.domain.entities.position import ActivePositionEntity
-from discord_trade_bot.core.domain.services.breakeven_calculator import calculate_realized_pnl
+from discord_trade_bot.core.domain.services.breakeven_calculator import calculate_breakeven_price, calculate_realized_pnl
 from discord_trade_bot.core.domain.value_objects.trading import BreakevenMoveResult, PositionStatus, TradeSide
 from discord_trade_bot.main.config.app import AppConfig
 
@@ -75,7 +75,6 @@ class ProcessTrackerEventUseCase:
         # Check if this is a protective TP trigger for pending entry
         # Strategy: Check if there's a limit order on exchange (means position not opened yet)
         if status == "Rejected":
-            print(status)
             try:
                 # Get exchange (composite will use default exchange)
                 exchange = self._exchange_registry.get_exchange("composite")
@@ -85,16 +84,8 @@ class ProcessTrackerEventUseCase:
                 # Check if there's a limit order (pending entry not filled yet)
                 limit_orders = [order for order in open_orders if order.get("orderType") == "Limit" and order.get("stopOrderType") == ""]
                 if limit_orders:
-                    # There's a limit order → position not opened yet → this is protective TP trigger
-                    # logger.info(f"🎯 [PENDING TP] Protective TP triggered for {symbol} (limit order still open on exchange)")
-                    #
-                    # # Log which TP was triggered (from event)
-                    # tp_price = order_info.get("p")  # Price from event
-                    # if tp_price:
-                    #     logger.info(f"🎯 [PENDING TP] TP at {tp_price} triggered before limit order filled")
-
                     # Cancel ALL orders for this symbol (limit + all protective orders)
-                    logger.info(f"🚫 Cancelling all orders for {symbol} due to protective TP trigger")
+                    logger.info(f"🚫 Cancelling all orders for {symbol}")
                     await exchange.cancel_all_orders(symbol)
                     logger.info(f"✅ All orders cancelled for {symbol}")
 
@@ -586,33 +577,47 @@ class ProcessTrackerEventUseCase:
         return round(price, precision)
 
     def _calculate_entry_based_sl(self, position: ActivePositionEntity) -> float:
-        """Calculate SL price at entry level accounting for fees.
+        """Calculate SL price at entry level accounting for fees and realized PnL.
 
-        This places the stop loss at the entry price, adjusted for fees to ensure
-        that if the SL is hit, the overall trade breaks even (accounting for fees).
+        This uses the global breakeven calculation that considers:
+        - Fees paid on entry for the full position
+        - Realized PnL from partial closures (e.g., TP1)
+        - Fees that will be paid on exit for the remaining position
+
+        This approach is more accurate than simple fee adjustment because it accounts
+        for the profit already realized from partial exits, allowing a more aggressive
+        (better) breakeven price.
 
         Args:
             position: Active position entity
 
         Returns:
-            SL price at entry level (adjusted for fees)
+            SL price at true breakeven level (accounting for all fees and realized PnL)
         """
-        entry_price = position.entry_price
-        fee_rate = self._config.fees.get_break_even_fee_rate()
+        # Use the global breakeven calculator that accounts for realized PnL
+        be_price = calculate_breakeven_price(
+            entry_price=position.entry_price,
+            side=position.side,
+            qty_total=position.qty,
+            qty_remaining=position.remaining_qty,
+            realized_pnl_gross=position.realized_pnl_usdt,
+            fees_config=self._config.fees,
+        )
 
-        # Calculate fees for closing remaining position at entry level
-        remaining_notional = position.remaining_qty * entry_price
-        fees_for_close = remaining_notional * fee_rate
+        if be_price is None:
+            # Fallback to simple fee adjustment if calculation fails
+            logger.warning(f"⚠️ Global breakeven calculation failed for {position.symbol}, using simple fee adjustment")
+            fee_rate = self._config.fees.get_break_even_fee_rate()
+            remaining_notional = position.remaining_qty * position.entry_price
+            fees_for_close = remaining_notional * fee_rate
+            fee_per_unit = fees_for_close / position.remaining_qty
 
-        # Adjust SL from entry to account for fees
-        fee_per_unit = fees_for_close / position.remaining_qty
+            if position.side == TradeSide.LONG:
+                return position.entry_price + fee_per_unit
+            else:  # SHORT
+                return position.entry_price - fee_per_unit
 
-        if position.side == TradeSide.LONG:
-            # For LONG: SL slightly above entry to cover fees
-            return entry_price + fee_per_unit
-        else:  # SHORT
-            # For SHORT: SL slightly below entry to cover fees
-            return entry_price - fee_per_unit
+        return be_price
 
     async def _move_sl_to_tp1(self, position: ActivePositionEntity) -> None:
         """Move SL to TP1 level after TP3 is hit.
