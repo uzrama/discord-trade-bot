@@ -2,7 +2,6 @@ import asyncio
 import logging
 from asyncio import Lock
 from collections import defaultdict
-from pprint import pprint
 from typing import Any, final
 
 from discord_trade_bot.core.application.common.interfaces.notification import NotificationGatewayProtocol
@@ -71,7 +70,6 @@ class ProcessTrackerEventUseCase:
         status = order_info.get("X", "")
 
         logger.debug(f"WebSocket event for {symbol}: order_id={order_id}, status={status}, event_type={event.get('e')}")
-
         # Check if this is a protective TP trigger for pending entry
         # Strategy: Check if there's a limit order on exchange (means position not opened yet)
         if status == "Rejected":
@@ -248,11 +246,9 @@ class ProcessTrackerEventUseCase:
             position.breakeven_applied = True
             return BreakevenMoveResult.POSITION_ALREADY_CLOSED
 
+        position_info = await exchange.get_position(symbol)
         # Check if position still exists on exchange
         try:
-            position_info = await exchange.get_position(symbol)
-
-            # Use helper method to get position size (supports both Binance and Bybit)
             position_amt = self._get_position_size(position_info)
 
             if position_amt < 0.0001:
@@ -276,62 +272,25 @@ class ProcessTrackerEventUseCase:
         # ATTEMPT 1: SL at entry price (breakeven with fee adjustment)
         # ============================================================
 
-        be_price = self._calculate_entry_based_sl(position)
-
+        breakeven_price = float(position_info["breakEvenPrice"])
         logger.info(
             f"🛡️ [USE CASE] Moving Stop Loss to entry price (breakeven) for {symbol}...\n"
             f"  Entry: {position.entry_price:.8f}\n"
-            f"  SL (Entry + fees): {be_price:.8f}\n"
+            f"  SL (Entry + fees): {breakeven_price:.8f}\n"
             f"  Current price: {current_price:.8f}\n"
             f"  Remaining qty: {position.remaining_qty:.2f}\n"
             f"  Realized PnL: {position.realized_pnl_usdt:.2f} USDT"
         )
 
         # Check if distance is valid
-        if self._is_sl_distance_valid(be_price, current_price, position.side):
-            if await self._try_move_sl(position, exchange, be_price, "entry_breakeven"):
-                msg = f"🛡️ **{symbol}**: Stop loss moved to breakeven (entry price)!\n  Entry: {position.entry_price:.8f}\n  SL: {be_price:.8f}\n  Remaining: {position.remaining_qty:.2f}"
-                logger.info(msg)
-                await self._notification_gateway.send_message(msg)
-                return BreakevenMoveResult.SUCCESS
-        else:
-            logger.warning(f"⚠️ Entry-based SL {be_price:.8f} too close to market {current_price:.8f}, trying fallback...")
+        breakeven_price = float(position_info["breakEvenPrice"])
+        if await self._try_move_sl(position, exchange, breakeven_price, "entry_breakeven"):
+            msg = f"🛡️ **{symbol}**: Stop loss moved to breakeven (entry price)!\n  Entry: {position.entry_price:.8f}\n  SL: {breakeven_price:.8f}\n  Remaining: {position.remaining_qty:.2f}"
+            logger.info(msg)
+            return BreakevenMoveResult.SUCCESS
 
         # ============================================================
-        # ATTEMPT 2: Fallback to default_sl_percent from current price
-        # ============================================================
-
-        default_sl_pct = source_config.default_sl_percent / 100.0
-
-        if position.side == TradeSide.LONG:
-            fallback_sl = current_price * (1 - default_sl_pct)
-        else:  # SHORT
-            fallback_sl = current_price * (1 + default_sl_pct)
-
-        logger.info(
-            f"🔄 [FALLBACK] Attempting SL with default_sl_percent for {symbol}\n"
-            f"  Current price: {current_price:.8f}\n"
-            f"  default_sl_percent: {source_config.default_sl_percent}%\n"
-            f"  Fallback SL: {fallback_sl:.8f}"
-        )
-
-        # Check if distance is valid
-        if self._is_sl_distance_valid(fallback_sl, current_price, position.side):
-            if await self._try_move_sl(position, exchange, fallback_sl, f"fallback_{source_config.default_sl_percent}%"):
-                msg = (
-                    f"⚠️ **{symbol}**: SL moved using fallback strategy!\n"
-                    f"  Method: {source_config.default_sl_percent}% from current price\n"
-                    f"  SL Price: {fallback_sl:.8f}\n"
-                    f"  Reason: Calculated BE too close to market (high volatility)"
-                )
-                logger.warning(msg)
-                await self._notification_gateway.send_message(msg)
-                return BreakevenMoveResult.SUCCESS_FALLBACK
-        else:
-            logger.error(f"❌ Fallback SL {fallback_sl:.8f} also too close to market {current_price:.8f}, emergency close required!")
-
-        # ============================================================
-        # ATTEMPT 3: Emergency - Close entire position
+        # ATTEMPT 2: Emergency - Close entire position
         # ============================================================
 
         logger.error(f"🚨 [EMERGENCY] All SL move attempts failed for {symbol}, closing position...")
@@ -358,36 +317,6 @@ class ProcessTrackerEventUseCase:
             await self._notification_gateway.send_message(msg)
 
             return BreakevenMoveResult.POSITION_CLOSED
-
-    def _is_sl_distance_valid(self, sl_price: float, current_price: float, side: TradeSide, min_distance_pct: float = 0.3) -> bool:
-        """Check if SL price is far enough from current market price.
-
-        Args:
-            sl_price: Proposed stop loss price
-            current_price: Current market price
-            side: Position side (LONG or SHORT)
-            min_distance_pct: Minimum distance in percentage (default: 0.3%)
-
-        Returns:
-            True if distance is valid, False otherwise
-        """
-        distance_pct = abs(sl_price - current_price) / current_price * 100
-
-        # Check minimum distance
-        if distance_pct < min_distance_pct:
-            logger.debug(f"SL distance {distance_pct:.3f}% < {min_distance_pct}% (too close to market)")
-            return False
-
-        # Check direction (SL must be below market for LONG, above for SHORT)
-        if side == TradeSide.LONG and sl_price >= current_price:
-            logger.debug(f"SL {sl_price} >= current {current_price} for LONG (wrong direction)")
-            return False
-
-        if side == TradeSide.SHORT and sl_price <= current_price:
-            logger.debug(f"SL {sl_price} <= current {current_price} for SHORT (wrong direction)")
-            return False
-
-        return True
 
     async def _try_move_sl(self, position: ActivePositionEntity, exchange: ExchangeGatewayProtocol, stop_price: float, reason: str) -> bool:
         """Try to move SL to specified price.
@@ -669,15 +598,12 @@ class ProcessTrackerEventUseCase:
         )
 
         # Check if distance is valid
-        if self._is_sl_distance_valid(sl_price, current_price, position.side):
-            if await self._try_move_sl(position, exchange, sl_price, "tp1_after_tp3"):
-                msg = f"🛡️ **{symbol}**: Stop loss moved to TP1 level (after TP3)!\n  TP1: {tp1_price:.8f}\n  SL: {sl_price:.8f}\n  Remaining: {position.remaining_qty:.2f}"
-                logger.info(msg)
-                await self._notification_gateway.send_message(msg)
-            else:
-                logger.warning(f"⚠️ Failed to move SL to TP1 for {symbol} after TP3")
+        if await self._try_move_sl(position, exchange, sl_price, "tp1_after_tp3"):
+            msg = f"🛡️ **{symbol}**: Stop loss moved to TP1 level (after TP3)!\n  TP1: {tp1_price:.8f}\n  SL: {sl_price:.8f}\n  Remaining: {position.remaining_qty:.2f}"
+            logger.info(msg)
+            await self._notification_gateway.send_message(msg)
         else:
-            logger.warning(f"⚠️ TP1-based SL {sl_price:.8f} too close to market {current_price:.8f} after TP3 for {symbol}, keeping current SL")
+            logger.warning(f"⚠️ Failed to move SL to TP1 for {symbol} after TP3")
 
     def _get_source_config(self, source_id: str):
         """Get source configuration by source_id.
