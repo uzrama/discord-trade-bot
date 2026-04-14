@@ -69,7 +69,7 @@ class ProcessTrackerEventUseCase:
         symbol = order_info.get("s", "")
         status = order_info.get("X", "")
 
-        logger.debug(f"WebSocket event for {symbol}: order_id={order_id}, status={status}, event_type={event.get('e')}")
+        logger.warning(f"WebSocket event for {symbol}: order_id={order_id}, status={status}, event_type={event.get('e')}")
         # Check if this is a protective TP trigger for pending entry
         # Strategy: Check if there's a limit order on exchange (means position not opened yet)
         if status == "Rejected":
@@ -101,7 +101,6 @@ class ProcessTrackerEventUseCase:
         # For conditional orders (TP/SL), Binance uses 'si' (algoId), otherwise 'i' (orderId)
         order_id = str(order_info.get("si") or order_info.get("i", ""))
         active_positions = await self._state_repository.get_open_positions()
-
         # Filter positions by symbol first (in memory, no DB query)
         matching_positions = [p for p in active_positions if p.symbol == symbol and p.id]
 
@@ -113,12 +112,11 @@ class ProcessTrackerEventUseCase:
             position_id = position.id
             if not position_id:  # Extra safety check for type checker
                 continue
-
             # Lock this specific position to prevent race conditions
             async with self._position_locks[position_id]:
                 # Re-fetch only THIS position inside lock to get latest state
-                position = await self._state_repository.get_position_by_id(position_id)
-                if not position or position.status != PositionStatus.OPEN:
+                # position = await self._state_repository.get_position_by_id(position_id)
+                if not position:
                     continue
                 # Check for Take Profit execution
                 if order_id in position.tp_order_ids:
