@@ -7,6 +7,7 @@ from dishka import Provider, Scope, provide
 from discord_trade_bot.core.application.common.interfaces.notification import NotificationGatewayProtocol
 from discord_trade_bot.core.application.common.interfaces.repository import StateRepositoryProtocol
 from discord_trade_bot.core.application.signal.use_cases import ProcessSignalUseCase
+from discord_trade_bot.core.application.signal.use_cases.update import SignalUpdateUseCase
 from discord_trade_bot.core.application.trading.interfaces import ExchangeGatewayProtocol, ExchangeRegistryProtocol
 from discord_trade_bot.core.application.trading.use_cases import OpenPositionUseCase, ProcessTrackerEventUseCase
 from discord_trade_bot.infrastructure.exchanges.binance import BinanceFuturesAdapter
@@ -110,5 +111,20 @@ class TradingProvider(Provider):
             notification_gateway=notification_gateway,
             state_repository=state_repository,
             open_position_use_case=open_position_use_case,
+            config=config,
+        )
+
+    @provide(scope=Scope.APP)
+    def get_update_signal_use_case(
+        self,
+        config: AppConfig,
+        exchange_registry: ExchangeRegistryProtocol,
+        notification_gateway: NotificationGatewayProtocol,
+        state_repository: StateRepositoryProtocol,
+    ) -> SignalUpdateUseCase:
+        return SignalUpdateUseCase(
+            exchange_registry=exchange_registry,
+            notification_gateway=notification_gateway,
+            state_repository=state_repository,
             config=config,
         )

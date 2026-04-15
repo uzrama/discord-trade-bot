@@ -15,6 +15,7 @@ class DiscordSelfAdapter(discord.Client):
         self,
         token: str,
         on_message_callback: Callable[[ProcessSignalDTO], Awaitable[None]],
+        on_message_edit_callback: Callable[[ProcessSignalDTO], Awaitable[None]],
         watched_channel_ids: set[int],
         channel_to_source_map: dict[int, str],
         **options,
@@ -22,6 +23,7 @@ class DiscordSelfAdapter(discord.Client):
         super().__init__(**options)
         self._token = token
         self._on_message_callback = on_message_callback
+        self._on_message_edit_callback = on_message_edit_callback
         self._watched_channel_ids = watched_channel_ids
         self._channel_to_source_map = channel_to_source_map
 
@@ -69,7 +71,7 @@ class DiscordSelfAdapter(discord.Client):
             text=after_text,
         )
 
-        await self._on_message_callback(dto)
+        await self._on_message_edit_callback(dto)
 
     def _extract_full_text(self, message: discord.Message) -> str:
         """Extract full text from message including embeds and fields."""

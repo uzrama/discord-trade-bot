@@ -12,10 +12,10 @@ from discord_trade_bot.core.application.signal.dto import (
     SignalProcessingResultDTO,
 )
 from discord_trade_bot.core.application.trading.interfaces import (
-    ExchangeGatewayProtocol,
     ExchangeRegistryProtocol,
 )
 from discord_trade_bot.core.domain.entities.signal import ParsedSignalEntity
+from discord_trade_bot.core.domain.services.parser import SignalParserService
 from discord_trade_bot.core.domain.value_objects.trading import PositionStatus, TradeSide
 from discord_trade_bot.main.config.app import AppConfig
 
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 @final
-class HandleSignalUpdateUseCase:
+class SignalUpdateUseCase:
     """Use case for handling signal updates (edited messages with new SL/TP).
 
     This use case handles the workflow when a Discord message is edited to add
@@ -46,9 +46,11 @@ class HandleSignalUpdateUseCase:
         self._exchange_registry = exchange_registry
         self._notification_gateway = notification_gateway
         self._state_repository = state_repository
+
+        self._parser = SignalParserService()
         self._config = config
 
-    async def execute(self, sig: ParsedSignalEntity, dto: ProcessSignalDTO) -> SignalProcessingResultDTO:
+    async def execute(self, dto: ProcessSignalDTO) -> SignalProcessingResultDTO:
         """Handle signal update for an existing position.
 
         This method:
@@ -64,6 +66,8 @@ class HandleSignalUpdateUseCase:
         Returns:
             Result indicating success/failure and relevant details.
         """
+
+        sig = self._parser.parse(dto.channel_id, dto.message_id, dto.text)
         if not sig.symbol:
             return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason="No symbol in update")
 

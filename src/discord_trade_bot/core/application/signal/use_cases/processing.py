@@ -13,7 +13,7 @@ from discord_trade_bot.core.application.signal.dto import (
     SignalProcessingResultDTO,
 )
 from discord_trade_bot.core.application.signal.use_cases.update import (
-    HandleSignalUpdateUseCase,
+    SignalUpdateUseCase,
 )
 from discord_trade_bot.core.application.trading.dto import TradeSettingsDTO
 from discord_trade_bot.core.application.trading.interfaces import (
@@ -60,7 +60,7 @@ class ProcessSignalUseCase:
         self._open_position_use_case = open_position_use_case
         self._config = config
         self._parser = SignalParserService()
-        self._handle_signal_update_use_case = HandleSignalUpdateUseCase(
+        self._handle_signal_update_use_case = SignalUpdateUseCase(
             exchange_registry=exchange_registry,
             notification_gateway=notification_gateway,
             state_repository=state_repository,
@@ -92,10 +92,10 @@ class ProcessSignalUseCase:
             return SignalProcessingResultDTO(success=False, message_id=dto.message_id, reason="Invalid signal")
 
         # Decision logic: is it a primary signal or an update?
-        if sig.signal_type == "signal_update":
-            # Handle signal update (edited message with new SL/TP)
-            logger.info(f"Processing signal update for {sig.symbol}")
-            return await self._handle_signal_update_use_case.execute(sig, dto)
+        # if sig.signal_type == "signal_update":
+        #     # Handle signal update (edited message with new SL/TP)
+        #     logger.info(f"Processing signal update for {sig.symbol}")
+        #     return await self._handle_signal_update_use_case.execute(sig, dto)
 
         if sig.signal_type == "primary_signal":
             # Get source config
