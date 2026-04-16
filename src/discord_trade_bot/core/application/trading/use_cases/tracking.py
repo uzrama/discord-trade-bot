@@ -456,22 +456,15 @@ class ProcessTrackerEventUseCase:
         """
         symbol = position.symbol
 
-        # Cancel all position orders before closing position
-        await self._cancel_all_position_orders(position, exchange)
-
         close_side = TradeSide.SHORT if position.side == TradeSide.LONG else TradeSide.LONG
 
-        # Get symbol info for precision
-        symbol_info = await exchange.get_symbol_info(symbol)
-        qty_precision = symbol_info.get("qty_precision", 3)
-
-        # Round quantity to exchange precision
-        qty_rounded = self._round_quantity(position.remaining_qty, qty_precision)
-
-        logger.warning(f"🚨 Emergency closing position {symbol}: remaining_qty={qty_rounded:.8f}")
-
         # Close position with market order
-        await exchange.place_market_order(symbol=symbol, side=close_side, qty=qty_rounded, reduce_only=True)
+        await exchange.place_market_order(symbol=symbol, side=close_side, qty=0, reduce_only=True)
+
+        # Cancel all position orders
+        await self._cancel_all_position_orders(position, exchange)
+
+        logger.warning(f"🚨 Emergency closing position {symbol}")
 
         position.status = PositionStatus.CLOSED
         position.breakeven_applied = True
@@ -502,49 +495,6 @@ class ProcessTrackerEventUseCase:
             Rounded price
         """
         return round(price, precision)
-
-    def _calculate_entry_based_sl(self, position: ActivePositionEntity) -> float:
-        """Calculate SL price at entry level accounting for fees and realized PnL.
-
-        This uses the global breakeven calculation that considers:
-        - Fees paid on entry for the full position
-        - Realized PnL from partial closures (e.g., TP1)
-        - Fees that will be paid on exit for the remaining position
-
-        This approach is more accurate than simple fee adjustment because it accounts
-        for the profit already realized from partial exits, allowing a more aggressive
-        (better) breakeven price.
-
-        Args:
-            position: Active position entity
-
-        Returns:
-            SL price at true breakeven level (accounting for all fees and realized PnL)
-        """
-        # Use the global breakeven calculator that accounts for realized PnL
-        be_price = calculate_breakeven_price(
-            entry_price=position.entry_price,
-            side=position.side,
-            qty_total=position.qty,
-            qty_remaining=position.remaining_qty,
-            realized_pnl_gross=position.realized_pnl_usdt,
-            fees_config=self._config.fees,
-        )
-
-        if be_price is None:
-            # Fallback to simple fee adjustment if calculation fails
-            logger.warning(f"⚠️ Global breakeven calculation failed for {position.symbol}, using simple fee adjustment")
-            fee_rate = self._config.fees.get_break_even_fee_rate()
-            remaining_notional = position.remaining_qty * position.entry_price
-            fees_for_close = remaining_notional * fee_rate
-            fee_per_unit = fees_for_close / position.remaining_qty
-
-            if position.side == TradeSide.LONG:
-                return position.entry_price + fee_per_unit
-            else:  # SHORT
-                return position.entry_price - fee_per_unit
-
-        return be_price
 
     async def _move_sl_to_tp1(self, position: ActivePositionEntity) -> None:
         """Move SL to TP1 level after TP3 is hit.

@@ -319,6 +319,7 @@ class BybitAdapter(BaseExchangeAdapter):
                     current_price = None
 
                 res = await self.place_stop_market_order(symbol, side, stop_loss)
+
                 results["stop_loss"] = res
 
                 # Log success with details
