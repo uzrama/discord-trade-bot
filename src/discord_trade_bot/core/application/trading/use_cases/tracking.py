@@ -246,17 +246,17 @@ class ProcessTrackerEventUseCase:
 
         position_info = await exchange.get_position(symbol)
         # Check if position still exists on exchange
-        try:
-            position_amt = self._get_position_size(position_info)
-
-            if position_amt < 0.0001:
-                logger.warning(f"⚠️ Position for {symbol} is already closed or too small ({position_amt})")
-                position.breakeven_applied = True
-                return BreakevenMoveResult.POSITION_ALREADY_CLOSED
-
-            logger.info(f"✅ Position confirmed for {symbol}: {position_amt} units")
-        except Exception as e:
-            logger.warning(f"Could not check position for {symbol}: {e}")
+        # try:
+        #     position_amt = self._get_position_size(position_info)
+        #
+        #     if position_amt < 0.0001:
+        #         logger.warning(f"⚠️ Position for {symbol} is already closed or too small ({position_amt})")
+        #         position.breakeven_applied = True
+        #         return BreakevenMoveResult.POSITION_ALREADY_CLOSED
+        #
+        #     logger.info(f"✅ Position confirmed for {symbol}: {position_amt} units")
+        # except Exception as e:
+        #     logger.warning(f"Could not check position for {symbol}: {e}")
 
         # Get current market price
         try:
